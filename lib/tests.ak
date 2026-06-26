@@ -111,7 +111,8 @@ pub fn make_minimal_gs_datum(
   paused: Bool,
   mintable: Int,
   admin: ByteArray,
-  requires_kyc: Bool,
+  requires_sender_kyc: Bool,
+  requires_receiver_kyc: Bool,
 ) -> GlobalStateDatum {
   GlobalStateDatum {
     transfers_paused: paused,
@@ -121,8 +122,9 @@ pub fn make_minimal_gs_datum(
     denylist_linked_list_policy_id: test_denylist_policy_id,
     security_info: "Test Security Token",
     trusted_entity_vkeys: [],
-    requires_receiver_kyc: requires_kyc,
     member_root_hash: "",
+    requires_sender_kyc,
+    requires_receiver_kyc,
     // or Some(...) for merkle tests
     network_id: 0,
   }
@@ -481,12 +483,14 @@ test denylist_deinit_without_admin_signature_fails() fail {
 // ---------------------------------------------------------------------------
 
 test gs_pause_by_authorized_power_user() {
-  let gs = make_minimal_gs_datum(False, 1_000_000, test_admin_credential, True)
+  let gs =
+    make_minimal_gs_datum(False, 1_000_000, test_admin_credential, True, True)
   gs.transfers_paused == False
 }
 
 test gs_unpause_by_authorized_power_user() {
-  let gs = make_minimal_gs_datum(True, 1_000_000, test_admin_credential, True)
+  let gs =
+    make_minimal_gs_datum(True, 1_000_000, test_admin_credential, True, True)
   gs.transfers_paused == True
 }
 
@@ -495,13 +499,14 @@ test gs_unpause_by_authorized_power_user() {
 // ---------------------------------------------------------------------------
 
 test gs_mint_security_remaining_cap_positive() {
-  let gs = make_minimal_gs_datum(False, 1_000_000, test_admin_credential, True)
+  let gs =
+    make_minimal_gs_datum(False, 1_000_000, test_admin_credential, True, True)
   let minted = 500
   gs.mintable_amount - minted >= 0
 }
 
 test gs_mint_security_exceeds_cap_fails() fail {
-  let gs = make_minimal_gs_datum(False, 100, test_admin_credential, True)
+  let gs = make_minimal_gs_datum(False, 100, test_admin_credential, True, True)
   let minted = 200
   gs.mintable_amount - minted >= 0
 }
@@ -699,13 +704,14 @@ test minting_logic_gs_nft_presence_positive() {
 // ---------------------------------------------------------------------------
 
 test minting_within_remaining_cap() {
-  let gs = make_minimal_gs_datum(False, 1_000_000, test_admin_credential, True)
+  let gs =
+    make_minimal_gs_datum(False, 1_000_000, test_admin_credential, True, True)
   let minted = 500
   gs.mintable_amount - minted >= 0
 }
 
 test minting_exceeds_remaining_cap_fails() fail {
-  let gs = make_minimal_gs_datum(False, 100, test_admin_credential, True)
+  let gs = make_minimal_gs_datum(False, 100, test_admin_credential, True, True)
   let minted = 200
   gs.mintable_amount - minted >= 0
 }
@@ -719,12 +725,14 @@ test minting_exceeds_remaining_cap_fails() fail {
 // ---------------------------------------------------------------------------
 
 test regular_transfer_paused_fails() fail {
-  let gs = make_minimal_gs_datum(True, 1_000_000, test_admin_credential, True)
+  let gs =
+    make_minimal_gs_datum(True, 1_000_000, test_admin_credential, True, True)
   gs.transfers_paused == False
 }
 
 test regular_transfer_not_paused_succeeds() {
-  let gs = make_minimal_gs_datum(False, 1_000_000, test_admin_credential, True)
+  let gs =
+    make_minimal_gs_datum(False, 1_000_000, test_admin_credential, True, True)
   gs.transfers_paused == False
 }
 
