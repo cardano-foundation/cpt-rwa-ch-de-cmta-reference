@@ -1,10 +1,20 @@
-# Bafin compliant securities
+# BaFin compliant securities
 
-This set of smart contracts allows to have Bafin compliant security tokens on Cardano.
-It follows the latest version of CIP-113 made by Michele Nuzzi, Matteo Coppola and Philip Desarro:
+This set of smart contracts allows to have BaFin compliant security tokens on Cardano.
+It follows the latest version of CIP-113 made by Michele Nuzzi, Matteo Coppola, Giovanni Gargiulo and Philip Di Sarro:
 https://github.com/HarmonicLabs/CIPs/tree/master/CIP-meta-assets%20(ERC20-like%20assets)
 
-Bafin requires the user's security tokens to be freezable and to eventually force transfer them when the user requests to remove his ownership.
+## BaFin Mandatory On-Chain Enforcement at Smart Contract Level
+* Tamper-proof, chronological, immutable logging of all state changes: Every transfer, mint, burn, freeze, role change, or metadata update must be recorded in strict time order on the ledger with no possibility of deletion or retroactive alteration. The system must guarantee finality and prevent forks/reorgs from invalidating entries.
+* Enforcement of recorded disposal restrictions / transfer impediments: Before any transfer, validate against on-chain (or oracle-fed) flags for lock-ups, ownership limits, investor categories, sanctions lists, or other impediments recorded in the register. Unauthorized transfers must be rejected. (This is the core "compliance engine" – equivalent to ERC-3643 hooks.)
+* Per-holder or global freezing / pausing: Authorized roles (registrar/compliance officer) must be able to freeze individual addresses, specific tokens, or the entire asset class. Frozen assets cannot be transferred or traded until unfrozen. This supports regulatory holds, investigations, or sanctions.
+* Role-based access control with registrar/issuer/compliance officer roles: Only predefined authorized addresses/roles can mint, force-burn/transfer, update restrictions/metadata, freeze/unfreeze. The licensed registrar must have enforceable control to maintain the register's accuracy.
+* Accurate holder identification and recording: The on-chain state must track holders (via address or hash) in a way that allows the licensed registrar to map them 1:1 to verified identities (KYC/AML performed off-chain by the registrar). Support for individual vs. collective entries. Holder data must be queryable/exportable.
+* Mandatory metadata / essential rights reference: The token must carry immutable or role-updatable on-chain references to: ISIN/securities ID, issuer details, essential content of rights, nominal amount/issue volume, custody type (individual/collective). This must be published/notified as required by eWpG §20.
+* Forced actions by compliance/registrar role: Ability for authorized parties to force transfers, burns, or redemptions (e.g., for regulatory enforcement, insolvency, or corporate actions).
+* Full audit trail and event emission: All actions must emit detailed, immutable events/logs including timestamps, parties, and reasons. This supports BaFin audits and participant access rights.
+* Exportability / interoperability of register data: The smart contract must allow full export of holder list, history, metadata, and restrictions in a standardized, machine-readable format so data can be migrated to another (BaFin-licensed) register without loss.
+* Integrity, authenticity, and availability guarantees: Technical/organizational measures to protect against unauthorized modification, data loss, or forgery. Source code of the validation logic must be providable to BaFin on request (as per eWpRV).
 
 ## Actors
 Different actors cover different roles:
