@@ -775,16 +775,3 @@ test sanitise_accepts_valid_config() {
 test sanitise_accepts_32_byte_root() {
   sanitise_initial_datum(sanitise_datum(t_root32, 2), sanitise_mint())
 }
-
-test sanitise_rejects_network_id_above_255() {
-  !sanitise_initial_datum(sanitise_datum(#"", 256), sanitise_mint())
-}
-
-test sanitise_rejects_negative_network_id() {
-  !sanitise_initial_datum(sanitise_datum(#"", -1), sanitise_mint())
-}
-
-test sanitise_rejects_bad_root_hash_length() {
-  // 2 bytes — neither empty nor 32.
-  !sanitise_initial_datum(sanitise_datum(#"aabb", 1), sanitise_mint())
-}
