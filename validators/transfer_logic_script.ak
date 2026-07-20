@@ -106,7 +106,7 @@ validator transfer_logic_validator(
       fn(index, sender_pkh, acc) {
         expect acc
         let action = utils.safe_list_at(redeemer.actions_for_each_input, index)
-        let kyc_ok = if gs_datum.requires_receiver_kyc {
+        let kyc_ok = if gs_datum.requires_sender_kyc {
           verify_kyc_proof(
             action.source_proof,
             sender_pkh,

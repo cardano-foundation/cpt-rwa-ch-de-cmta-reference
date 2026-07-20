@@ -24,7 +24,11 @@ use utils.{must_be_signed_by_credential}
 /// denylisted or have expired KYC. That is the point.
 ///
 /// Plus:
-///   - Transfers-paused gate (same as regular transfers — H-3 fix).
+///   - Deactivation gate: rejected only once the protocol is `deactivated`.
+///     Unlike regular transfers, a force transfer is NOT blocked by a mere
+///     pause — enforcement/seizure must remain available during an incident
+///     pause (matches CMTAT `forcedTransfer`, which bypasses pause/freeze and
+///     is blocked only when the contract is deactivated).
 ///   - `can_force_transfer` power user signs.
 validator third_party_transfer_logic_validator(
   security_asset_name: ByteArray,
@@ -41,7 +45,7 @@ validator third_party_transfer_logic_validator(
       self.reference_inputs,
       registry_policy_id,
       credential,
-      constants.transfer_logic_script_registry_node_index,
+      constants.third_party_transfer_logic_script_registry_node_index,
     )
 
     // Pause + GS-datum decode.
@@ -49,7 +53,7 @@ validator third_party_transfer_logic_validator(
       self.reference_inputs,
       redeemer.global_state_ref_input_index,
     )
-    let transfers_paused = global_state.is_paused(
+    let transfers_deactivated = global_state.is_deactivated(
       gs_input,
       global_state_policy_id,
     )
@@ -129,7 +133,7 @@ validator third_party_transfer_logic_validator(
         )
 
     and {
-      transfers_paused == False,
+      transfers_deactivated == False,
       all_destinations_ok,
       power_user_data.can_force_transfer,
       must_be_signed_by_credential(self, power_user_node_key),

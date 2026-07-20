@@ -75,17 +75,16 @@ pub const test_security_asset_name: ByteArray = "SECURITY_TOKEN"
 
 // Helper: Minimal CIP-113 registry node (for derive_issuance... tests)
 fn make_cip113_registry_ref_input() -> Input {
-  let node =
-    RegistryNode {
-      key: test_issuance_policy_id,
-      next: #"ffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
-      minting_logic_script: Script(test_minting_logic_hash),
-      transfer_logic_script: Script(test_transfer_logic_hash),
-      third_party_transfer_logic_script: Script(
-        test_third_party_transfer_logic_hash,
-      ),
-      global_state_cs: test_global_state_cs,
-    }
+  let node = RegistryNode {
+    key: test_issuance_policy_id,
+    next: #"ffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    minting_logic_script: Script(test_minting_logic_hash),
+    transfer_logic_script: Script(test_transfer_logic_hash),
+    third_party_transfer_logic_script: Script(
+      test_third_party_transfer_logic_hash,
+    ),
+    global_state_cs: test_global_state_cs,
+  }
   Input {
     output_reference: OutputReference {
       transaction_id: #"0000000000000000000000000000000000000000000000000000000000000000",
@@ -116,6 +115,7 @@ pub fn make_minimal_gs_datum(
 ) -> GlobalStateDatum {
   GlobalStateDatum {
     transfers_paused: paused,
+    deactivated: False,
     mintable_amount: mintable,
     admin_credential_hash: admin,
     power_user_linked_list_policy_id: test_power_users_policy_id,
@@ -182,13 +182,12 @@ pub fn empty_tx() -> Transaction {
 // ============================================================================
 
 test derive_issuance_policy_id_from_cip113_registry_node() {
-  let issuance_policy_id =
-    utils.derive_issuance_policy_id_from_registry_node(
-      [make_cip113_registry_ref_input()],
-      test_registry_policy_id,
-      Script(test_transfer_logic_hash),
-      constants.transfer_logic_script_registry_node_index,
-    )
+  let issuance_policy_id = utils.derive_issuance_policy_id_from_registry_node(
+    [make_cip113_registry_ref_input()],
+    test_registry_policy_id,
+    Script(test_transfer_logic_hash),
+    constants.transfer_logic_script_registry_node_index,
+  )
   issuance_policy_id == test_issuance_policy_id
 }
 
@@ -203,44 +202,41 @@ fn tx_signed_by(signers: List<ByteArray>) -> Transaction {
 // ============================================================================
 
 test power_user_is_admin_true() {
-  let pu =
-    make_power_user(
-      test_power_user_credential,
-      True,
-      // is_admin
-      False,
-      False,
-      False,
-      False,
-    )
+  let pu = make_power_user(
+    test_power_user_credential,
+    True,
+    // is_admin
+    False,
+    False,
+    False,
+    False,
+  )
   pu.is_admin == True
 }
 
 test power_user_is_admin_false() {
-  let pu =
-    make_power_user(
-      test_power_user_credential,
-      False,
-      // not admin
-      True,
-      True,
-      True,
-      True,
-    )
+  let pu = make_power_user(
+    test_power_user_credential,
+    False,
+    // not admin
+    True,
+    True,
+    True,
+    True,
+  )
   pu.is_admin == False
 }
 
 test power_user_can_mint_role() {
-  let pu =
-    make_power_user(
-      test_power_user_credential,
-      False,
-      True,
-      // can_mint = true
-      False,
-      False,
-      False,
-    )
+  let pu = make_power_user(
+    test_power_user_credential,
+    False,
+    True,
+    // can_mint = true
+    False,
+    False,
+    False,
+  )
   and {
     pu.can_mint == True,
     pu.can_burn == False,
@@ -249,43 +245,40 @@ test power_user_can_mint_role() {
 }
 
 test power_user_can_burn_role() {
-  let pu =
-    make_power_user(
-      test_power_user_credential,
-      False,
-      False,
-      True,
-      // can_burn = true
-      False,
-      False,
-    )
+  let pu = make_power_user(
+    test_power_user_credential,
+    False,
+    False,
+    True,
+    // can_burn = true
+    False,
+    False,
+  )
   pu.can_burn == True
 }
 
 test power_user_can_pause_role() {
-  let pu =
-    make_power_user(
-      test_power_user_credential,
-      False,
-      False,
-      False,
-      True,
-      // can_pause
-      False,
-    )
+  let pu = make_power_user(
+    test_power_user_credential,
+    False,
+    False,
+    False,
+    True,
+    // can_pause
+    False,
+  )
   pu.can_pause == True
 }
 
 test power_user_can_force_transfer_role() {
-  let pu =
-    make_power_user(
-      test_power_user_credential,
-      False,
-      False,
-      False,
-      False,
-      True,
-    )
+  let pu = make_power_user(
+    test_power_user_credential,
+    False,
+    False,
+    False,
+    False,
+    True,
+  )
   // can_force_transfer
   pu.can_force_transfer == True
 }
@@ -297,10 +290,9 @@ test must_be_signed_by_credential_positive_single_signer() {
 }
 
 test must_be_signed_by_credential_positive_multiple_signers() {
-  let tx =
-    tx_signed_by(
-      [test_user_credential, test_admin_credential, test_power_user_credential],
-    )
+  let tx = tx_signed_by(
+    [test_user_credential, test_admin_credential, test_power_user_credential],
+  )
   utils.must_be_signed_by_credential(tx, test_power_user_credential) == True
 }
 
@@ -316,25 +308,23 @@ test must_be_signed_by_credential_negative_empty_signatories() fail {
 
 // Init nonce validation (real logic)
 test power_users_init_nonce_check_success() {
-  let init_ref =
-    OutputReference {
-      transaction_id: #"deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
-      output_index: 0,
-    }
+  let init_ref = OutputReference {
+    transaction_id: #"deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+    output_index: 0,
+  }
 
-  let matching_input =
-    Input {
-      output_reference: init_ref,
-      output: Output {
-        address: Address {
-          payment_credential: Script(""),
-          stake_credential: None,
-        },
-        value: from_lovelace(2_000_000),
-        datum: NoDatum,
-        reference_script: None,
+  let matching_input = Input {
+    output_reference: init_ref,
+    output: Output {
+      address: Address {
+        payment_credential: Script(""),
+        stake_credential: None,
       },
-    }
+      value: from_lovelace(2_000_000),
+      datum: NoDatum,
+      reference_script: None,
+    },
+  }
 
   let tx = Transaction { ..empty_tx(), inputs: [matching_input] }
 
@@ -342,30 +332,27 @@ test power_users_init_nonce_check_success() {
 }
 
 test power_users_init_nonce_check_failure_wrong_reference() fail {
-  let correct_ref =
-    OutputReference {
-      transaction_id: #"deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
-      output_index: 0,
-    }
-  let wrong_ref =
-    OutputReference {
-      transaction_id: #"1111111111111111111111111111111111111111111111111111111111111111",
-      output_index: 0,
-    }
+  let correct_ref = OutputReference {
+    transaction_id: #"deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+    output_index: 0,
+  }
+  let wrong_ref = OutputReference {
+    transaction_id: #"1111111111111111111111111111111111111111111111111111111111111111",
+    output_index: 0,
+  }
 
-  let bad_input =
-    Input {
-      output_reference: wrong_ref,
-      output: Output {
-        address: Address {
-          payment_credential: Script(""),
-          stake_credential: None,
-        },
-        value: from_lovelace(2_000_000),
-        datum: NoDatum,
-        reference_script: None,
+  let bad_input = Input {
+    output_reference: wrong_ref,
+    output: Output {
+      address: Address {
+        payment_credential: Script(""),
+        stake_credential: None,
       },
-    }
+      value: from_lovelace(2_000_000),
+      datum: NoDatum,
+      reference_script: None,
+    },
+  }
 
   let tx = Transaction { ..empty_tx(), inputs: [bad_input] }
 
@@ -381,21 +368,39 @@ test power_users_init_nonce_check_failure_wrong_reference() fail {
 // ---------------------------------------------------------------------------
 
 test denylist_add_by_admin_role_success() {
-  let admin_pu =
-    make_power_user(test_admin_credential, True, False, False, False, False)
+  let admin_pu = make_power_user(
+    test_admin_credential,
+    True,
+    False,
+    False,
+    False,
+    False,
+  )
   admin_pu.is_admin == True
 }
 
 test denylist_add_by_non_admin_fails() fail {
-  let non_admin_pu =
-    make_power_user(test_power_user_credential, False, True, True, True, True)
+  let non_admin_pu = make_power_user(
+    test_power_user_credential,
+    False,
+    True,
+    True,
+    True,
+    True,
+  )
   non_admin_pu.is_admin == True
   // role check fails
 }
 
 test denylist_remove_by_admin_role_success() {
-  let admin_pu =
-    make_power_user(test_admin_credential, True, False, False, False, False)
+  let admin_pu = make_power_user(
+    test_admin_credential,
+    True,
+    False,
+    False,
+    False,
+    False,
+  )
   admin_pu.is_admin == True
 }
 
@@ -404,25 +409,23 @@ test denylist_remove_by_admin_role_success() {
 // ---------------------------------------------------------------------------
 
 test denylist_init_nonce_check_success() {
-  let init_ref =
-    OutputReference {
-      transaction_id: #"deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
-      output_index: 0,
-    }
+  let init_ref = OutputReference {
+    transaction_id: #"deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+    output_index: 0,
+  }
 
-  let matching_input =
-    Input {
-      output_reference: init_ref,
-      output: Output {
-        address: Address {
-          payment_credential: Script(""),
-          stake_credential: None,
-        },
-        value: from_lovelace(2_000_000),
-        datum: NoDatum,
-        reference_script: None,
+  let matching_input = Input {
+    output_reference: init_ref,
+    output: Output {
+      address: Address {
+        payment_credential: Script(""),
+        stake_credential: None,
       },
-    }
+      value: from_lovelace(2_000_000),
+      datum: NoDatum,
+      reference_script: None,
+    },
+  }
 
   let tx = Transaction { ..empty_tx(), inputs: [matching_input] }
 
@@ -430,30 +433,27 @@ test denylist_init_nonce_check_success() {
 }
 
 test denylist_init_nonce_check_failure() fail {
-  let correct_ref =
-    OutputReference {
-      transaction_id: #"deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
-      output_index: 0,
-    }
-  let wrong_ref =
-    OutputReference {
-      transaction_id: #"1111111111111111111111111111111111111111111111111111111111111111",
-      output_index: 0,
-    }
+  let correct_ref = OutputReference {
+    transaction_id: #"deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+    output_index: 0,
+  }
+  let wrong_ref = OutputReference {
+    transaction_id: #"1111111111111111111111111111111111111111111111111111111111111111",
+    output_index: 0,
+  }
 
-  let bad_input =
-    Input {
-      output_reference: wrong_ref,
-      output: Output {
-        address: Address {
-          payment_credential: Script(""),
-          stake_credential: None,
-        },
-        value: from_lovelace(2_000_000),
-        datum: NoDatum,
-        reference_script: None,
+  let bad_input = Input {
+    output_reference: wrong_ref,
+    output: Output {
+      address: Address {
+        payment_credential: Script(""),
+        stake_credential: None,
       },
-    }
+      value: from_lovelace(2_000_000),
+      datum: NoDatum,
+      reference_script: None,
+    },
+  }
 
   let tx = Transaction { ..empty_tx(), inputs: [bad_input] }
 
@@ -483,14 +483,24 @@ test denylist_deinit_without_admin_signature_fails() fail {
 // ---------------------------------------------------------------------------
 
 test gs_pause_by_authorized_power_user() {
-  let gs =
-    make_minimal_gs_datum(False, 1_000_000, test_admin_credential, True, True)
+  let gs = make_minimal_gs_datum(
+    False,
+    1_000_000,
+    test_admin_credential,
+    True,
+    True,
+  )
   gs.transfers_paused == False
 }
 
 test gs_unpause_by_authorized_power_user() {
-  let gs =
-    make_minimal_gs_datum(True, 1_000_000, test_admin_credential, True, True)
+  let gs = make_minimal_gs_datum(
+    True,
+    1_000_000,
+    test_admin_credential,
+    True,
+    True,
+  )
   gs.transfers_paused == True
 }
 
@@ -499,8 +509,13 @@ test gs_unpause_by_authorized_power_user() {
 // ---------------------------------------------------------------------------
 
 test gs_mint_security_remaining_cap_positive() {
-  let gs =
-    make_minimal_gs_datum(False, 1_000_000, test_admin_credential, True, True)
+  let gs = make_minimal_gs_datum(
+    False,
+    1_000_000,
+    test_admin_credential,
+    True,
+    True,
+  )
   let minted = 500
   gs.mintable_amount - minted >= 0
 }
@@ -556,31 +571,28 @@ fn is_sorted_no_dup_vkeys_test(entries: Pairs<ByteArray, ByteArray>) -> Bool {
 }
 
 test gs_trusted_vkeys_sorted_no_dups_success() {
-  let vkeys: Pairs<ByteArray, ByteArray> =
-    [
-      Pair(#"10000000000000000000000000000000000000000000000000000000", ""),
-      Pair(#"20000000000000000000000000000000000000000000000000000000", ""),
-      Pair(#"30000000000000000000000000000000000000000000000000000000", ""),
-    ]
+  let vkeys: Pairs<ByteArray, ByteArray> = [
+    Pair(#"10000000000000000000000000000000000000000000000000000000", ""),
+    Pair(#"20000000000000000000000000000000000000000000000000000000", ""),
+    Pair(#"30000000000000000000000000000000000000000000000000000000", ""),
+  ]
   is_sorted_no_dup_vkeys_test(vkeys) == True
 }
 
 test gs_trusted_vkeys_duplicate_fails() fail {
-  let vkeys: Pairs<ByteArray, ByteArray> =
-    [
-      Pair(#"10000000000000000000000000000000000000000000000000000000", ""),
-      Pair(#"20000000000000000000000000000000000000000000000000000000", ""),
-      Pair(#"20000000000000000000000000000000000000000000000000000000", ""),
-    ]
+  let vkeys: Pairs<ByteArray, ByteArray> = [
+    Pair(#"10000000000000000000000000000000000000000000000000000000", ""),
+    Pair(#"20000000000000000000000000000000000000000000000000000000", ""),
+    Pair(#"20000000000000000000000000000000000000000000000000000000", ""),
+  ]
   is_sorted_no_dup_vkeys_test(vkeys) == True
 }
 
 test gs_trusted_vkeys_not_ascending_fails() fail {
-  let vkeys: Pairs<ByteArray, ByteArray> =
-    [
-      Pair(#"30000000000000000000000000000000000000000000000000000000", ""),
-      Pair(#"20000000000000000000000000000000000000000000000000000000", ""),
-    ]
+  let vkeys: Pairs<ByteArray, ByteArray> = [
+    Pair(#"30000000000000000000000000000000000000000000000000000000", ""),
+    Pair(#"20000000000000000000000000000000000000000000000000000000", ""),
+  ]
   is_sorted_no_dup_vkeys_test(vkeys) == True
 }
 
@@ -613,54 +625,50 @@ test gs_rotate_admin_missing_old_signature_fails() fail {
 // ---------------------------------------------------------------------------
 
 test minting_requires_can_mint_role_positive() {
-  let pu =
-    make_power_user(
-      test_power_user_credential,
-      False,
-      True,
-      False,
-      False,
-      False,
-    )
+  let pu = make_power_user(
+    test_power_user_credential,
+    False,
+    True,
+    False,
+    False,
+    False,
+  )
   pu.can_mint == True
 }
 
 test minting_requires_can_mint_role_fails() fail {
-  let pu =
-    make_power_user(
-      test_power_user_credential,
-      False,
-      False,
-      True,
-      False,
-      False,
-    )
+  let pu = make_power_user(
+    test_power_user_credential,
+    False,
+    False,
+    True,
+    False,
+    False,
+  )
   pu.can_mint == True
 }
 
 test burning_requires_can_burn_role_positive() {
-  let pu =
-    make_power_user(
-      test_power_user_credential,
-      False,
-      False,
-      True,
-      False,
-      False,
-    )
+  let pu = make_power_user(
+    test_power_user_credential,
+    False,
+    False,
+    True,
+    False,
+    False,
+  )
   pu.can_burn == True
 }
 
 test burning_requires_can_burn_role_fails() fail {
-  let pu =
-    make_power_user(
-      test_power_user_credential,
-      False,
-      True,
-      False,
-      False,
-      False,
-    )
+  let pu = make_power_user(
+    test_power_user_credential,
+    False,
+    True,
+    False,
+    False,
+    False,
+  )
   pu.can_burn == True
 }
 
@@ -669,25 +677,24 @@ test burning_requires_can_burn_role_fails() fail {
 // ---------------------------------------------------------------------------
 
 test minting_logic_gs_nft_presence_positive() {
-  let gs_input =
-    Input {
-      output_reference: OutputReference {
-        transaction_id: #"0000000000000000000000000000000000000000000000000000000000000000",
-        output_index: 0,
+  let gs_input = Input {
+    output_reference: OutputReference {
+      transaction_id: #"0000000000000000000000000000000000000000000000000000000000000000",
+      output_index: 0,
+    },
+    output: Output {
+      address: Address {
+        payment_credential: Script(test_global_state_cs),
+        stake_credential: None,
       },
-      output: Output {
-        address: Address {
-          payment_credential: Script(test_global_state_cs),
-          stake_credential: None,
-        },
-        value: merge(
-          from_lovelace(2_000_000),
-          from_asset(test_global_state_cs, constants.global_state_asset_name, 1),
-        ),
-        datum: NoDatum,
-        reference_script: None,
-      },
-    }
+      value: merge(
+        from_lovelace(2_000_000),
+        from_asset(test_global_state_cs, constants.global_state_asset_name, 1),
+      ),
+      datum: NoDatum,
+      reference_script: None,
+    },
+  }
 
   let tx = Transaction { ..empty_tx(), inputs: [gs_input] }
   expect Some(in) = list.at(tx.inputs, 0)
@@ -704,8 +711,13 @@ test minting_logic_gs_nft_presence_positive() {
 // ---------------------------------------------------------------------------
 
 test minting_within_remaining_cap() {
-  let gs =
-    make_minimal_gs_datum(False, 1_000_000, test_admin_credential, True, True)
+  let gs = make_minimal_gs_datum(
+    False,
+    1_000_000,
+    test_admin_credential,
+    True,
+    True,
+  )
   let minted = 500
   gs.mintable_amount - minted >= 0
 }
@@ -725,14 +737,24 @@ test minting_exceeds_remaining_cap_fails() fail {
 // ---------------------------------------------------------------------------
 
 test regular_transfer_paused_fails() fail {
-  let gs =
-    make_minimal_gs_datum(True, 1_000_000, test_admin_credential, True, True)
+  let gs = make_minimal_gs_datum(
+    True,
+    1_000_000,
+    test_admin_credential,
+    True,
+    True,
+  )
   gs.transfers_paused == False
 }
 
 test regular_transfer_not_paused_succeeds() {
-  let gs =
-    make_minimal_gs_datum(False, 1_000_000, test_admin_credential, True, True)
+  let gs = make_minimal_gs_datum(
+    False,
+    1_000_000,
+    test_admin_credential,
+    True,
+    True,
+  )
   gs.transfers_paused == False
 }
 
@@ -741,17 +763,20 @@ test regular_transfer_not_paused_succeeds() {
 // ---------------------------------------------------------------------------
 
 test denylist_absence_covers_key_success() {
-  let covering_key =
-    Some(#"40000000000000000000000000000000000000000000000000000000")
-  let covering_link =
-    Some(#"60000000000000000000000000000000000000000000000000000000")
+  let covering_key = Some(
+    #"40000000000000000000000000000000000000000000000000000000",
+  )
+  let covering_link = Some(
+    #"60000000000000000000000000000000000000000000000000000000",
+  )
   let target = #"50000000000000000000000000000000000000000000000000000000"
   covers_key(covering_key, covering_link, target) == True
 }
 
 test denylist_absence_covers_key_fails_below() fail {
-  let covering_key =
-    Some(#"60000000000000000000000000000000000000000000000000000000")
+  let covering_key = Some(
+    #"60000000000000000000000000000000000000000000000000000000",
+  )
   let covering_link = None
   let target = #"50000000000000000000000000000000000000000000000000000000"
   covers_key(covering_key, covering_link, target) == True
@@ -801,30 +826,27 @@ test covers_key_fails_when_target_above_link() fail {
 }
 
 test gs_sanitise_sorted_vkeys_success() {
-  let vkeys: Pairs<ByteArray, ByteArray> =
-    [
-      Pair(#"10000000000000000000000000000000000000000000000000000000", ""),
-      Pair(#"20000000000000000000000000000000000000000000000000000000", ""),
-      Pair(#"30000000000000000000000000000000000000000000000000000000", ""),
-    ]
+  let vkeys: Pairs<ByteArray, ByteArray> = [
+    Pair(#"10000000000000000000000000000000000000000000000000000000", ""),
+    Pair(#"20000000000000000000000000000000000000000000000000000000", ""),
+    Pair(#"30000000000000000000000000000000000000000000000000000000", ""),
+  ]
   is_sorted_no_dup_vkeys_test(vkeys)
 }
 
 test gs_sanitise_vkeys_with_duplicate_fails() fail {
-  let vkeys: Pairs<ByteArray, ByteArray> =
-    [
-      Pair(#"10000000000000000000000000000000000000000000000000000000", ""),
-      Pair(#"20000000000000000000000000000000000000000000000000000000", ""),
-      Pair(#"20000000000000000000000000000000000000000000000000000000", ""),
-    ]
+  let vkeys: Pairs<ByteArray, ByteArray> = [
+    Pair(#"10000000000000000000000000000000000000000000000000000000", ""),
+    Pair(#"20000000000000000000000000000000000000000000000000000000", ""),
+    Pair(#"20000000000000000000000000000000000000000000000000000000", ""),
+  ]
   is_sorted_no_dup_vkeys_test(vkeys)
 }
 
 test gs_sanitise_vkeys_not_strictly_ascending_fails() fail {
-  let vkeys: Pairs<ByteArray, ByteArray> =
-    [
-      Pair(#"30000000000000000000000000000000000000000000000000000000", ""),
-      Pair(#"20000000000000000000000000000000000000000000000000000000", ""),
-    ]
+  let vkeys: Pairs<ByteArray, ByteArray> = [
+    Pair(#"30000000000000000000000000000000000000000000000000000000", ""),
+    Pair(#"20000000000000000000000000000000000000000000000000000000", ""),
+  ]
   is_sorted_no_dup_vkeys_test(vkeys)
 }
