@@ -63,12 +63,25 @@ fn is_sorted_no_dup_vkeys(
 }
 
 fn sanitise_initial_datum(datum: GlobalStateDatum, self_mint: Value) -> Bool {
+  let root_len = bytearray.length(datum.member_root_hash)
   and {
     !datum.transfers_paused,
     // A born-deactivated protocol would be permanently unspendable at genesis.
     !datum.deactivated,
     datum.mintable_amount >= 0,
     bytearray.length(datum.admin_credential_hash) == 28,
+    // network_id is IMMUTABLE and must fit the 1-byte field encoded into every
+    // KYC-attestation payload (0–255). An out-of-range value would silently and
+    // permanently disable attestation-based transfers.
+    datum.network_id >= 0,
+    datum.network_id <= 255,
+    // member_root_hash must be empty (no membership tree yet) or a 32-byte
+    // blake2b-256 digest; any other length makes `mpf.from_root` trap on every
+    // membership-proof transfer.
+    or {
+      root_len == 0,
+      root_len == 32,
+    },
     // power_users LL root and denylist LL root must be minted in this tx
     quantity_of_policy_id(self_mint, datum.power_user_linked_list_policy_id) >= 1,
     quantity_of_policy_id(self_mint, datum.denylist_linked_list_policy_id) >= 1,
@@ -160,8 +173,15 @@ validator global_state_spend_validator(
     // here, before the branch dispatch, so no branch can ever unset the flag.
     // Deactivation is a permanent, fully-frozen tombstone: minting dies
     // (MintSecurity can no longer run) and transfers stay frozen (pause can no
-    // longer be lifted). Tokens are burned down *before* deactivating (ABS-09:
-    // "destroyed first or during"); post-deactivation the whole protocol is deactivated.
+    // longer be lifted).
+    //
+    // The CMTA functional spec permits deactivation with the existing tokens
+    // either *cancelled* (burned first) OR *immobilised* (frozen in place) — the
+    // latter is what an insolvency freeze needs: state preserved exactly as-is
+    // with no further token-level updates. This validator supports both: it
+    // does NOT require supply to be zero at deactivation, so the operator may
+    // burn down beforehand or immobilise as-is. It only guarantees the state is
+    // final afterwards.
     expect !input_datum.deactivated
 
     let global_state_output = utils.safe_list_at(
@@ -393,11 +413,18 @@ validator global_state_spend_validator(
           input_fields,
           new_member_root_hash,
         )
+        let new_root_len = bytearray.length(new_member_root_hash)
         and {
           no_concurrent_security_mint,
           address_preserved,
           nft_preserved,
           value_preserved,
+          // Keep the membership root well-formed: empty or a 32-byte digest;
+          // any other length makes `mpf.from_root` trap on every transfer.
+          or {
+            new_root_len == 0,
+            new_root_len == 32,
+          },
           must_be_signed_by_credential(self, input_datum.admin_credential_hash),
           builtin.equals_data(expected_output_datum, global_state_output_datum),
         }
@@ -683,8 +710,8 @@ fn mintsecurity_redeemer() -> GlobalStateSpendRedeemer {
 
 test deactivated_input_rejects_burn() fail {
   // Deactivation is fully terminal: even a burn (negative security-mint) is
-  // rejected by the terminal guard. (Wind-down burns happen BEFORE
-  // deactivating; and burns are unreachable post-deactivation anyway — F-21.)
+  // rejected by the terminal guard — no token-level update of any kind after
+  // deactivation, so an immobilised (frozen-as-is) state stays exactly as-is.
   let input_datum = t_datum(True, True)
   let burn = -100
   let output_datum = GlobalStateDatum {
@@ -774,4 +801,17 @@ test sanitise_accepts_valid_config() {
 
 test sanitise_accepts_32_byte_root() {
   sanitise_initial_datum(sanitise_datum(t_root32, 2), sanitise_mint())
+}
+
+test sanitise_rejects_network_id_above_255() {
+  !sanitise_initial_datum(sanitise_datum(#"", 256), sanitise_mint())
+}
+
+test sanitise_rejects_negative_network_id() {
+  !sanitise_initial_datum(sanitise_datum(#"", -1), sanitise_mint())
+}
+
+test sanitise_rejects_bad_root_hash_length() {
+  // 2 bytes — neither empty nor 32.
+  !sanitise_initial_datum(sanitise_datum(#"aabb", 1), sanitise_mint())
 }

@@ -64,7 +64,10 @@ validator minting_logic_validator(
         global_state_policy_id,
         constants.global_state_asset_name,
       ) == 1
-
+    let deactivated = global_state.is_deactivated(
+      gs_input,
+      global_state_policy_id,
+    )
     let power_user_ref_input = utils.safe_list_at(
       self.reference_inputs,
       redeemer.power_user_node_ref_input_index,
@@ -93,13 +96,36 @@ validator minting_logic_validator(
     // GS.requires_receiver_kyc — a KYC check that passes if EITHER a valid
     // KYC proof is presented OR the receiver is the power user authorising
     // this mint (`power_user_node_key`, already resolved above; it holds
-    // `can_mint` and signed the tx). This lets a minter mint to their own
-    // (list-authenticated) credential without a separate KYC attestation.
+    // `can_mint` and signed the tx).
+    //
+    // DELIBERATE DEVIATION (on record): CMTAT's Allowlist variant requires the
+    // mint receiver — the minter/treasury included — to be allowlisted. Here a
+    // `can_mint` power user may mint to their OWN list-authenticated credential
+    // without a separate KYC attestation. Rationale: under the CIP-113 address
+    // model the destination's stake credential IS the owner identity, and this
+    // is a signed, list-authenticated operator minting to itself; requiring the
+    // operator to also hold an off-chain KYC attestation adds no compliance
+    // value. The denylist-absence check still applies to the operator, so a
+    // sanctioned operator cannot mint to itself. (If you prefer exact CMTAT
+    // Allowlist behaviour, drop this branch and issue the treasury a KYC
+    // attestation at setup.)
+    //
     // Burns have no destinations — the holder side is vetted by the CIP-113
     // spend path.
     let destinations_ok = if minted_amount > 0 {
       expect InlineDatum(gs_datum_raw) = gs_input.output.datum
       expect gs_datum: GlobalStateDatum = gs_datum_raw
+      // OFF-CHAIN ABI: `destination_actions` is matched POSITIONALLY against the
+      // list of unique destination stake credentials produced here — i.e.
+      // first-occurrence order of token-bearing outputs, deduplicated
+      // (`list.unique(list.foldr(self.outputs, ...))`). `list.foldr` visits
+      // outputs left-to-right; `list.unique` keeps the first occurrence. The
+      // off-chain builder MUST emit one action per unique destination in
+      // exactly this order. (Same convention in transfer_logic_script.)
+      //
+      // A token-bearing output with no inline stake credential (enterprise /
+      // pointer address) traps here by design — mints must go to an
+      // identifiable owner.
       let outputs_user_stake_cred_hash = list.unique(
         list.foldr(
           self.outputs,
@@ -175,6 +201,8 @@ validator minting_logic_validator(
       }?,
       //Mint destinations must be vetted (denylist absence + optional KYC)
       destinations_ok?,
+      //Minting must not be deactivated
+      deactivated == False,
     }
   }
 
@@ -246,8 +274,12 @@ const test_dest_stake_hash: ByteArray =
 const test_dest_stake_hash_2: ByteArray =
   #"04040404040404040404040404040404040404040404040404040404"
 
-const test_dest_payment_hash: ByteArray =
-  #"03030303030303030303030303030303030303030303030303030303"
+// The real programmable-token custody address: payment credential is the
+// shared CIP-113 programmable-logic-base (PLB) SCRIPT, and the per-owner
+// identity is the inline STAKE credential. Fixtures model this shape so a
+// test can't silently pass under a broken PLB invariant.
+const test_plb_hash: ByteArray =
+  #"05050505050505050505050505050505050505050505050505050505"
 
 // Faithful mirror of the CIP-113 registry node layout (field order is
 // load-bearing: minting=2, transfer=3, third-party=4).
@@ -430,9 +462,28 @@ fn make_dest_output(amount: Int) -> Output {
 // a mint with two distinct destinations.
 fn make_dest_output_for(amount: Int, stake_hash: ByteArray) -> Output {
   Output {
+    // Real programmable-token shape: PLB script payment credential + inline
+    // owner stake credential (the identity the destination checks vet).
     address: Address {
-      payment_credential: VerificationKey(test_dest_payment_hash),
+      payment_credential: Script(test_plb_hash),
       stake_credential: Some(Inline(VerificationKey(stake_hash))),
+    },
+    value: merge(
+      from_lovelace(2_000_000),
+      from_asset(test_issuance_policy_id, test_security_asset_name, amount),
+    ),
+    datum: NoDatum,
+    reference_script: None,
+  }
+}
+
+// A token-bearing output with NO stake credential (an enterprise address).
+// Used to pin the intentional trap in the destination aggregation.
+fn make_enterprise_dest_output(amount: Int) -> Output {
+  Output {
+    address: Address {
+      payment_credential: Script(test_plb_hash),
+      stake_credential: None,
     },
     value: merge(
       from_lovelace(2_000_000),
@@ -734,6 +785,31 @@ test withdraw_fails_when_minting_without_mint_permission() {
       False,
       make_denylist_root_ref_input(),
       [make_dest_output(amount)],
+      [test_pu_credential_hash],
+    ),
+  )
+}
+
+test mint_to_enterprise_address_is_rejected() fail {
+  // A token-bearing mint output with no stake credential (enterprise address)
+  // must trap the destination aggregation (`expect Some(Inline(stake_cred))`).
+  // Pins the intentional "mints must go to an identifiable owner" behavior.
+  let amount = 1_000
+  let redeemer = MintingLogicScriptWithdrawRedeemer {
+    global_state_input_index: 0,
+    power_user_node_ref_input_index: 0,
+    minted_amount: amount,
+    destination_actions: [clean_dest_action()],
+  }
+  run_withdraw(
+    redeemer,
+    make_withdraw_tx(
+      amount,
+      True,
+      False,
+      False,
+      make_denylist_root_ref_input(),
+      [make_enterprise_dest_output(amount)],
       [test_pu_credential_hash],
     ),
   )
