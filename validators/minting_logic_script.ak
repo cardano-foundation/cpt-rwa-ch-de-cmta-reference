@@ -115,17 +115,6 @@ validator minting_logic_validator(
     let destinations_ok = if minted_amount > 0 {
       expect InlineDatum(gs_datum_raw) = gs_input.output.datum
       expect gs_datum: GlobalStateDatum = gs_datum_raw
-      // OFF-CHAIN ABI: `destination_actions` is matched POSITIONALLY against the
-      // list of unique destination stake credentials produced here — i.e.
-      // first-occurrence order of token-bearing outputs, deduplicated
-      // (`list.unique(list.foldr(self.outputs, ...))`). `list.foldr` visits
-      // outputs left-to-right; `list.unique` keeps the first occurrence. The
-      // off-chain builder MUST emit one action per unique destination in
-      // exactly this order. (Same convention in transfer_logic_script.)
-      //
-      // A token-bearing output with no inline stake credential (enterprise /
-      // pointer address) traps here by design — mints must go to an
-      // identifiable owner.
       let outputs_user_stake_cred_hash = list.unique(
         list.foldr(
           self.outputs,
