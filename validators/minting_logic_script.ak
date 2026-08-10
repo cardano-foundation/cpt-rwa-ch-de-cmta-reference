@@ -64,10 +64,8 @@ validator minting_logic_validator(
         global_state_policy_id,
         constants.global_state_asset_name,
       ) == 1
-    let deactivated = global_state.is_deactivated(
-      gs_input,
-      global_state_policy_id,
-    )
+    // Failing fast if the Token is deactivated
+    expect !global_state.is_deactivated(gs_input, global_state_policy_id)
     let power_user_ref_input = utils.safe_list_at(
       self.reference_inputs,
       redeemer.power_user_node_ref_input_index,
@@ -112,65 +110,20 @@ validator minting_logic_validator(
     //
     // Burns have no destinations — the holder side is vetted by the CIP-113
     // spend path.
+    //
+    // The checks themselves live in `verify_mint_destinations` below.
     let destinations_ok = if minted_amount > 0 {
       expect InlineDatum(gs_datum_raw) = gs_input.output.datum
       expect gs_datum: GlobalStateDatum = gs_datum_raw
-      let outputs_user_stake_cred_hash = list.unique(
-        list.foldr(
-          self.outputs,
-          [],
-          fn(output, result) {
-            if quantity_of(
-              output.value,
-              issuance_policy_id,
-              security_asset_name,
-            ) > 0 {
-              expect Some(Inline(stake_cred)) = output.address.stake_credential
-              let credential_hash = when stake_cred is {
-                VerificationKey(hash) -> hash
-                Script(hash) -> hash
-              }
-              list.push(result, credential_hash)
-            } else {
-              result
-            }
-          },
-        ),
-      )
-      list.indexed_foldr(
-        outputs_user_stake_cred_hash,
-        True,
-        fn(index, dest_pkh, acc) {
-          expect acc
-          let action = utils.safe_list_at(redeemer.destination_actions, index)
-          let kyc_ok = if gs_datum.requires_receiver_kyc {
-            or {
-              // The receiver is the power user authorising this mint.
-              dest_pkh == power_user_node_key,
-              // …or a valid KYC proof is presented for the receiver.
-              verify_kyc_proof(
-                action.destination_proof,
-                dest_pkh,
-                gs_datum,
-                issuance_policy_id,
-                gs_datum.network_id,
-                self,
-              ),
-            }
-          } else {
-            True
-          }
-          let denylist_ok = verify_denylist_absence(
-            dest_pkh,
-            action.destination_denylist_covering_ref_input_index,
-            self.reference_inputs,
-            gs_datum.denylist_linked_list_policy_id,
-          )
-          and {
-            kyc_ok,
-            denylist_ok,
-          }
-        },
+      verify_mint_destinations(
+        self.outputs,
+        redeemer.destination_actions,
+        [],
+        issuance_policy_id,
+        security_asset_name,
+        gs_datum,
+        power_user_node_key,
+        self,
       )
     } else {
       True
@@ -190,8 +143,6 @@ validator minting_logic_validator(
       }?,
       //Mint destinations must be vetted (denylist absence + optional KYC)
       destinations_ok?,
-      //Minting must not be deactivated
-      deactivated == False,
     }
   }
 
@@ -210,6 +161,99 @@ validator minting_logic_validator(
 
   else(_) {
     fail
+  }
+}
+
+/// The CMTAT rationale for the two gates below — and the DELIBERATE DEVIATION
+/// permitting a `can_mint` power user to mint to itself without a KYC
+/// attestation — is documented at the call site in `withdraw`.
+fn verify_mint_destinations(
+  outputs: List<Output>,
+  actions: List<MintingLogicDestinationAction>,
+  seen: List<ByteArray>,
+  issuance_policy_id: ByteArray,
+  security_asset_name: ByteArray,
+  gs_datum: GlobalStateDatum,
+  power_user_node_key: ByteArray,
+  self: Transaction,
+) -> Bool {
+  when outputs is {
+    [] -> True
+    [output, ..rest_outputs] ->
+      if quantity_of(output.value, issuance_policy_id, security_asset_name) > 0 {
+        // Mints must go to an identifiable owner: the CIP-113 payment
+        // credential is the shared PLB script, so the inline STAKE credential
+        // is the only identity to vet. An enterprise address traps here.
+        expect Some(Inline(stake_cred)) = output.address.stake_credential
+        let dest_pkh = when stake_cred is {
+          VerificationKey(hash) -> hash
+          Script(hash) -> hash
+        }
+        if list.has(seen, dest_pkh) {
+          // Already vetted by an earlier output — consume no action, so the
+          // redeemer stays indexed by unique destination rather than by output.
+          verify_mint_destinations(
+            rest_outputs,
+            actions,
+            seen,
+            issuance_policy_id,
+            security_asset_name,
+            gs_datum,
+            power_user_node_key,
+            self,
+          )
+        } else {
+          // Mirrors the old `safe_list_at`: a destination with no matching
+          // action traps rather than being waved through.
+          expect [action, ..rest_actions] = actions
+          and {
+            if gs_datum.requires_receiver_kyc {
+              or {
+                // The receiver is the power user authorising this mint.
+                dest_pkh == power_user_node_key,
+                // …or a valid KYC proof is presented for the receiver.
+                verify_kyc_proof(
+                  action.destination_proof,
+                  dest_pkh,
+                  gs_datum,
+                  issuance_policy_id,
+                  gs_datum.network_id,
+                  self,
+                ),
+              }
+            } else {
+              True
+            },
+            verify_denylist_absence(
+              dest_pkh,
+              action.destination_denylist_covering_ref_input_index,
+              self.reference_inputs,
+              gs_datum.denylist_linked_list_policy_id,
+            ),
+            verify_mint_destinations(
+              rest_outputs,
+              rest_actions,
+              [dest_pkh, ..seen],
+              issuance_policy_id,
+              security_asset_name,
+              gs_datum,
+              power_user_node_key,
+              self,
+            ),
+          }
+        }
+      } else {
+        verify_mint_destinations(
+          rest_outputs,
+          actions,
+          seen,
+          issuance_policy_id,
+          security_asset_name,
+          gs_datum,
+          power_user_node_key,
+          self,
+        )
+      }
   }
 }
 
