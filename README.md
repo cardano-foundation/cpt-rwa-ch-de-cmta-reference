@@ -1,46 +1,28 @@
-# Regulated security tokens on Cardano — German (eWpG) and Swiss (CMTA) profiles
+# Programmable asset tokens on Cardano — German and Swiss profiles
 
-Aiken (Plutus V3) contracts that provide the **on-chain enforcement primitives** a regulated
-security token needs: KYC-gated transfers, a sanctions denylist, global pause, forced transfer
-(seizure), a supply cap, role-split operators, and an irreversible decommission switch.
+Aiken (Plutus V3) contracts providing on-chain primitives for programmable asset tokens   designed as reference profiles for use cases based on the CMTA framework and supporting the implementation of Swiss and German legal requirements. The primitives include KYC-gated transfers, denylisting, global pause, forced transfers and seizures, supply caps, role-based permissions, and an irreversible decommission mechanism.
 
-The contracts build on CIP-113 (programmable tokens) by Michele Nuzzi, Matteo Coppola,
-Giovanni Gargiulo and Philip Di Sarro:
-<https://github.com/HarmonicLabs/CIPs/tree/master/CIP-meta-assets%20(ERC20-like%20assets)>
+The contracts build on CIP-113 (programmable tokens) by Michele Nuzzi, Matteo Coppola, Giovanni Gargiulo and Philip Di Sarro: [CIP-113](https://github.com/HarmonicLabs/CIPs/blob/master/CIP-0113/README.md) 
 
 ---
 
-## A note on terminology
+## Important note and disclaimer
 
-This repository previously described itself as implementing a "BaFin standard". It does not —
-**there is no BaFin token standard.** Getting this right matters, so to be precise:
+The profiles draw on relevant Swiss and German legal requirements, including the Swiss framework for ledger-based securities according to the Swiss Code of Obligation (**Obligationenrecht; OR**) and the German framework for electronic securities according to the German Electronic Securities Act (**Gesetz über elektronische Wertpapiere; eWpG**), as well as technical standards and functional requirements developed by CMTA. 
 
-| Term | What it actually is |
-|---|---|
-| **BaFin** | *Bundesanstalt für Finanzdienstleistungsaufsicht*, the German Federal Financial Supervisory Authority. It **supervises and licenses** crypto securities registrars and publishes the § 20 eWpG list of notified crypto securities. It does **not** publish a smart contract standard. |
-| **eWpG** | *Gesetz über elektronische Wertpapiere*, the German Electronic Securities Act (in force since 10 June 2021). The **law**, together with the **eWpRV** register ordinance. Instruments issued under it are *Kryptowertpapiere* recorded in a *Kryptowertpapierregister*. |
-| **ERC-7551** | "Crypto Security Token Smart Contract Interface (eWpG)" — the nearest thing to a **German technical standard**, now also a CMTAT module. EVM-specific in its signatures. |
-| **CMTA** | *Capital Markets and Technology Association*, a Swiss association. The **organisation**, not the standard. |
-| **CMTAT** | The *CMTA Token* — CMTA's blockchain-agnostic, open-source security token framework. This is the **Swiss standard** referred to below. |
-| **Swiss law** | The DLT Act (in force 1 February 2021) introduced **ledger-based securities** (*Registerwertrechte*) in Art. 973d ff. of the Swiss Code of Obligations. |
+The profiles provide technical functionality only and are intended to support the implementation of certain features that may be relevant for legal or regulatory compliance under a certain jurisdiction. Its use does not imply, establish, or ensure compliance with any applicable legal or regulatory requirements. Each user is solely responsible for assessing the legal and regulatory implications of their specific implementation and/or use case and for ensuring it meets legal and regulatory requirements. It is strongly recommended to obtain appropriate professional advice where necessary.
 
-Accordingly, this repository does not claim to be "BaFin compliant" or "CMTA certified". It aims
-to implement the **on-chain half** of what each regime requires. See
-[Compliance status](#compliance-status) and the [disclaimer](#disclaimer).
 
 ---
 
 ## The two profiles
 
-Both profiles are served by **one shared contract set**, not two separate codebases — the
-enforcement primitives the two regimes demand overlap almost entirely. What differs is the
-metadata schema and which behaviours are mandatory.
+Both profiles are supported by **a shared set of contracts**, rather than separate codebases, reflecting the substantial overlap in the relevant on-chain functionality. What differs is only the metadata schema and which behaviours are mandatory.
 
-### German profile — eWpG / eWpRV
 
-Targets the obligations of the German Electronic Securities Act. The register itself is kept by a
-BaFin-authorised registrar (*registerführende Stelle*); these contracts are intended to serve as
-the technical register layer under that registrar's control. Requirements addressed on-chain:
+### German profile
+
+Reflects technical requirements and functionalities relevant under the German eWpG. Where applicable, the relevant register is maintained  under the responsibility of a duly authorized registrar (**registerführende Stelle**); the contracts are intended to serve as the technical register layer that provides the on-chain functionality supporting such a register. Relevant features addressed on-chain include:
 
 * **Tamper-evident, chronological record of state changes** — every transfer, mint, freeze, role
   change and metadata update is a ledger transaction, ordered and immutable once settled.
@@ -58,33 +40,18 @@ the technical register layer under that registrar's control. Requirements addres
   nominal amount, volume of issuance, register and custodian references
   ([`lib/types/security/bafin.ak`](lib/types/security/bafin.ak)).
 
-Two things this layer deliberately does **not** do, because they are not smart contract problems:
+Certain requirements remain outside the scope of this technical layer and need to be addressed off-chain. This includes specific publication and notification requirements as per the eWpG, which are not fulfilled through on-chain metadata, as well as KYC/AML processes and identity verification. The contracts only provide functionality to record and enforce the resulting on-chain status, such as verified or denylisted addresses.
 
-* **§ 20 eWpG publication** — publishing the entry in the *Bundesanzeiger* and notifying BaFin are
-  **off-chain duties of the issuer and registrar**. On-chain metadata does not discharge them.
-* **KYC/AML itself** — identity verification is performed off-chain by the registrar; the contracts
-  only record and enforce the resulting verified/denylisted status.
+### Swiss profile (CMTA Framework)
 
-### Swiss profile — CMTA / CMTAT
+Reflects technical requirements and functionalities defined by the CMTA Framework (Blockchain-agnostic functional specification of the CMTA token), providing a technical basis for implementations seeking to address relevant requirements under Swiss law. The framework defines 42 numbered functionalities `ABS-01…42`, of which **only `ABS-01…14` are mandatory**. CMTAT v3.2.0 (Solidity) serves as a semantic reference and technical reference for this profile, without implying full equivalence or conformity. The v3.2.0 release has not itself been fully audited; the latest fully audited release is v3.0.0.
+The profile implements the relevant base and enforcement functionality of the CMTA Framework, covering supply and balance views (ledger-native on Cardano), transfer, mint, burn, pause/unpause and status, deactivate and status, and full-address freeze/unfreeze and status. Optional modules (snapshots, distributions, debt terms, delegated approval) are not implemented; EVM-specific machinery (allowance mechanic, gasless relaying, cross-chain, interface conformance) is not applicable on eUTxO.
+A third-party equivalency assessment of this codebase is maintained at [CMTA/CMTAT-Cardano](https://github.com/CMTA/CMTAT-Cardano).
 
-Targets the CMTA Framework (*Blockchain-agnostic functional specification of the CMTAT token*),
-which defines 42 numbered functionalities `ABS-01…42`, of which **only `ABS-01…14` are mandatory**.
-CMTAT v3.2.0 (Solidity) is used as a semantic reference, not as the gold standard — it is itself
-unaudited at v3.2.0 (last fully audited release is v3.0.0).
-
-The mandatory base and enforcement modules are implemented: supply and balance views (ledger-native
-on Cardano), transfer, mint, burn, pause/unpause and status, deactivate and status, and
-full-address freeze/unfreeze and status. Optional modules (snapshots,
-distributions, debt terms, delegated approval) are not implemented; EVM-specific machinery
-(allowance mechanic, gasless relaying, cross-chain, interface conformance) is not applicable on
-eUTxO.
-
-A third-party equivalency assessment of this codebase is maintained at
-[CMTA/CMTAT-Cardano](https://github.com/CMTA/CMTAT-Cardano).
 
 ---
 
-## Compliance status
+## Technical compliance status
 
 The mandatory enforcement core is implemented and covered by the test suite: KYC-gated transfers
 (sender and receiver, each independently toggleable), a sanctions denylist, global pause, forced
@@ -197,7 +164,7 @@ deterministic chain and signed in a single batch.
 From there the protocol is live: mint and burn, pause and unpause, force transfers, verify or
 denylist holders, and add or modify power users.
 
-## Security token uniqueness
+## Token uniqueness
 
 Uniqueness derives from the genesis UTxO. `tx0`/`index0` are applied to `global_state_mint_validator`,
 which makes the GlobalState policy ID unique to that deployment; every other validator takes that
@@ -222,10 +189,8 @@ For wallets and dApps reading protocol state:
 
 ---
 
-## Disclaimer
-
-Obtain your own legal and security review before any production issuance.
-
 ## Authors
 
-Matteo Coppola, as part of the Finest team.
+- **Matteo Coppola**, as part of the Finest team.
+- **Giovanni Garguiolo**, Cardano Foundation
+- **Thomas Kammerlocher**, Cardano Foundation
