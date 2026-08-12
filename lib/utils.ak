@@ -117,9 +117,15 @@ pub fn derive_issuance_policy_id_from_registry_node(
   // CIP-113 derives the issuance policy id from the minting-logic hash and the
   // linked list keys nodes by that policy id, so at most one node can ever
   // satisfy both. A wrong index only ever traps.
-  let registry_ref_input = safe_list_at(ref_inputs, registry_node_ref_input_index)
+  let registry_ref_input = safe_list_at(
+    ref_inputs,
+    registry_node_ref_input_index,
+  )
   expect
-    assets.has_any_nft_strict(registry_ref_input.output.value, registry_policy_id)
+    assets.has_any_nft_strict(
+      registry_ref_input.output.value,
+      registry_policy_id,
+    )
   let registry_raw: Data = expect_inline_datum(registry_ref_input.output)
   let registry_fields: List<Data> = builtin.unconstr_fields(registry_raw)
   // The indexed registry field holds the script `Credential` of the logic

@@ -18,8 +18,8 @@ use kyc/verify.{verify_kyc_proof}
 use types/global_state.{GlobalStateDatum}
 use types/kyc_proof.{Attestation, AttestationProof}
 use types/minting_logic_script.{
-  MintBurn, MintingLogicDestinationAction,
-  MintingLogicScriptWithdrawRedeemer, RegisterToken,
+  MintBurn, MintingLogicDestinationAction, MintingLogicScriptWithdrawRedeemer,
+  RegisterToken,
 }
 use types/power_users.{PowerUser}
 use utils.{must_be_signed_by_credential}
@@ -65,14 +65,13 @@ validator minting_logic_validator(
         minted_amount: expected_minted_amount,
         destination_actions,
       } -> {
-        let issuance_policy_id =
-          utils.derive_issuance_policy_id_from_registry_node(
-            self.reference_inputs,
-            registry_policy_id,
-            credential,
-            constants.minting_logic_script_registry_node_index,
-            registry_node_ref_input_index,
-          )
+        let issuance_policy_id = utils.derive_issuance_policy_id_from_registry_node(
+          self.reference_inputs,
+          registry_policy_id,
+          credential,
+          constants.minting_logic_script_registry_node_index,
+          registry_node_ref_input_index,
+        )
 
         let minted_amount = quantity_of(
           self.mint,
@@ -155,13 +154,16 @@ fn verify_token_registration(
 
   let node_output = utils.safe_list_at(self.outputs, registry_node_output_index)
   expect assets.has_any_nft_strict(node_output.value, registry_policy_id)
-  let node_fields: List<Data> =
-    builtin.unconstr_fields(utils.expect_inline_datum(node_output))
+  let node_fields: List<Data> = builtin.unconstr_fields(
+    utils.expect_inline_datum(node_output),
+  )
 
   // Identity. An insert emits TWO registry-node outputs — the new node and the
   // re-emitted covering node — so the index alone does not identify ours.
-  expect Some(minting_logic_data) =
-    list.at(node_fields, constants.minting_logic_script_registry_node_index)
+  expect Some(minting_logic_data) = list.at(
+    node_fields,
+    constants.minting_logic_script_registry_node_index,
+  )
   expect node_minting_logic: Credential = minting_logic_data
   expect Script(node_minting_logic_hash) = node_minting_logic
   expect node_minting_logic_hash == own_hash
@@ -171,14 +173,18 @@ fn verify_token_registration(
   // that policy's transfer logic running — precisely the gate this token
   // depends on. `empty_vkey` is core's least-permission value; no ledger
   // transaction can carry a withdrawal keyed by an empty hash.
-  expect Some(unfracking_data) =
-    list.at(node_fields, constants.unfracking_logic_script_registry_node_index)
+  expect Some(unfracking_data) = list.at(
+    node_fields,
+    constants.unfracking_logic_script_registry_node_index,
+  )
   expect node_unfracking: Credential = unfracking_data
   expect node_unfracking == VerificationKey(#"")
 
   // The node must declare THIS deployment's GlobalState.
-  expect Some(global_state_cs_data) =
-    list.at(node_fields, constants.global_state_cs_registry_node_index)
+  expect Some(global_state_cs_data) = list.at(
+    node_fields,
+    constants.global_state_cs_registry_node_index,
+  )
   expect node_global_state_cs: ByteArray = global_state_cs_data
   expect node_global_state_cs == global_state_policy_id
 
@@ -195,16 +201,21 @@ fn verify_token_registration(
       [Pair(asset_name, _)] -> asset_name == security_asset_name
       _ -> False
     }
-  let minted_amount =
-    quantity_of(self.mint, issuance_policy_id, security_asset_name)
+  let minted_amount = quantity_of(
+    self.mint,
+    issuance_policy_id,
+    security_asset_name,
+  )
   // Nothing exists to burn at registration.
   expect minted_amount >= 0
 
   if minted_amount == 0 {
     // Structural registration: GS is only REFERENCED, so read the admin
     // credential from there. No GS spend action permits a no-op re-emit.
-    let gs_ref_input =
-      utils.safe_list_at(self.reference_inputs, global_state_ref_input_index)
+    let gs_ref_input = utils.safe_list_at(
+      self.reference_inputs,
+      global_state_ref_input_index,
+    )
     expect
       quantity_of(
         gs_ref_input.output.value,
@@ -283,24 +294,25 @@ fn verify_mint_or_burn(
     ) == 1
   // Failing fast if the Token is deactivated
   expect !global_state.is_deactivated(gs_input, global_state_policy_id)
-  let power_user_ref_input =
-    utils.safe_list_at(self.reference_inputs, power_user_node_ref_input_index)
+  let power_user_ref_input = utils.safe_list_at(
+    self.reference_inputs,
+    power_user_node_ref_input_index,
+  )
 
-  let (power_user_node_key, power_user_data) =
-    get_element_info(
-      power_user_ref_input.output,
-      fn(_lovelace, node_key, data, _link) {
-        expect Some(key) = node_key
-        expect power_user_data: PowerUser = data
-        (key, power_user_data)
-      },
-    )
-      |> run_element_with(
-          power_users_linked_list_policy_id,
-          constants.linked_list_root_key,
-          constants.linked_list_node_key_prefix,
-          constants.linked_list_node_key_prefix_length,
-        )
+  let (power_user_node_key, power_user_data) = get_element_info(
+    power_user_ref_input.output,
+    fn(_lovelace, node_key, data, _link) {
+      expect Some(key) = node_key
+      expect power_user_data: PowerUser = data
+      (key, power_user_data)
+    },
+  )
+    |> run_element_with(
+        power_users_linked_list_policy_id,
+        constants.linked_list_root_key,
+        constants.linked_list_node_key_prefix,
+        constants.linked_list_node_key_prefix_length,
+      )
 
   // Destination verification (mirrors transfer_logic_script's per-output
   // gate): CMTAT v3.2.0 refuses to mint to a frozen address (core) and to
@@ -328,23 +340,22 @@ fn verify_mint_or_burn(
   // spend path.
   //
   // The checks themselves live in `verify_mint_destinations` below.
-  let destinations_ok =
-    if minted_amount > 0 {
-      expect InlineDatum(gs_datum_raw) = gs_input.output.datum
-      expect gs_datum: GlobalStateDatum = gs_datum_raw
-      verify_mint_destinations(
-        self.outputs,
-        destination_actions,
-        [],
-        issuance_policy_id,
-        security_asset_name,
-        gs_datum,
-        power_user_node_key,
-        self,
-      )
-    } else {
-      True
-    }
+  let destinations_ok = if minted_amount > 0 {
+    expect InlineDatum(gs_datum_raw) = gs_input.output.datum
+    expect gs_datum: GlobalStateDatum = gs_datum_raw
+    verify_mint_destinations(
+      self.outputs,
+      destination_actions,
+      [],
+      issuance_policy_id,
+      security_asset_name,
+      gs_datum,
+      power_user_node_key,
+      self,
+    )
+  } else {
+    True
+  }
 
   and {
     //Redeemer contains the amount just for easy reference for eventual other contracts
@@ -1207,7 +1218,15 @@ fn make_registration_tx(
   mint: Value,
   signatories: List<ByteArray>,
 ) -> Transaction {
-  let base = make_withdraw_tx(0, True, False, False, make_denylist_root_ref_input(), [], [])
+  let base = make_withdraw_tx(
+    0,
+    True,
+    False,
+    False,
+    make_denylist_root_ref_input(),
+    [],
+    [],
+  )
   Transaction {
     ..base,
     inputs: [
