@@ -2,7 +2,7 @@ use aiken/builtin
 use aiken/collection/dict
 use aiken/collection/list
 use aiken/interval.{Finite, Interval, IntervalBound}
-use cardano/address.{Address, Credential, Script}
+use cardano/address.{Address, Credential, Script, VerificationKey}
 use cardano/assets.{from_asset, from_lovelace, merge, quantity_of}
 use cardano/transaction.{
   InlineDatum, Input, NoDatum, Output, OutputReference, Transaction,
@@ -24,13 +24,17 @@ use utils
 //   2: minting_logic_script             (Credential)
 //   3: transfer_logic_script            (Credential)
 //   4: third_party_transfer_logic_script(Credential)
-//   5: global_state_cs                  (ByteArray)
+//   5: unfracking_logic_script          (Credential)  -- added in v0.4.0
+//   6: global_state_cs                  (ByteArray)
 type RegistryNode {
   key: ByteArray,
   next: ByteArray,
   minting_logic_script: Credential,
   transfer_logic_script: Credential,
   third_party_transfer_logic_script: Credential,
+  /// CIP-113 v0.4.0 field 5. `VerificationKey(#"")` means unfracking is
+  /// FORBIDDEN for this policy — core's least-permission default.
+  unfracking_logic_script: Credential,
   global_state_cs: ByteArray,
 }
 
@@ -83,6 +87,7 @@ fn make_cip113_registry_ref_input() -> Input {
     third_party_transfer_logic_script: Script(
       test_third_party_transfer_logic_hash,
     ),
+    unfracking_logic_script: VerificationKey(#""),
     global_state_cs: test_global_state_cs,
   }
   Input {
@@ -187,6 +192,7 @@ test derive_issuance_policy_id_from_cip113_registry_node() {
     test_registry_policy_id,
     Script(test_transfer_logic_hash),
     constants.transfer_logic_script_registry_node_index,
+    0,
   )
   issuance_policy_id == test_issuance_policy_id
 }

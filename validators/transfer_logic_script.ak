@@ -47,6 +47,7 @@ validator transfer_logic_validator(
       registry_policy_id,
       credential,
       constants.transfer_logic_script_registry_node_index,
+      redeemer.registry_node_ref_input_index,
     )
 
     // 1. Resolve GS reference input and fast-check pause flag.
@@ -250,6 +251,9 @@ type TRegNode {
   minting_logic_script: Credential,
   transfer_logic_script: Credential,
   third_party_transfer_logic_script: Credential,
+  /// CIP-113 v0.4.0 field 5. `VerificationKey(#"")` means unfracking is
+  /// FORBIDDEN for this policy — core's least-permission default.
+  unfracking_logic_script: Credential,
   global_state_cs: ByteArray,
 }
 
@@ -314,6 +318,7 @@ fn t_registry_ref_input() -> Input {
     minting_logic_script: Script(t_minting_hash),
     transfer_logic_script: Script(t_transfer_hash),
     third_party_transfer_logic_script: Script(t_third_party_hash),
+    unfracking_logic_script: VerificationKey(#""),
     global_state_cs: t_gs_policy,
   }
   Input {
@@ -457,6 +462,7 @@ fn run_transfer(
 
 fn t_redeemer() -> TransferLogicScriptWithdrawRedeemer {
   TransferLogicScriptWithdrawRedeemer {
+    registry_node_ref_input_index: 0,
     global_state_ref_input_index: 1,
     actions_for_each_input: [t_source_action()],
     destination_actions: [t_dest_action()],

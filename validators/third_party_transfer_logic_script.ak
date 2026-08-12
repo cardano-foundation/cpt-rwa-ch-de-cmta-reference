@@ -63,6 +63,7 @@ validator third_party_transfer_logic_validator(
       registry_policy_id,
       credential,
       constants.third_party_transfer_logic_script_registry_node_index,
+      redeemer.registry_node_ref_input_index,
     )
 
     // Pause + GS-datum decode.
@@ -238,6 +239,9 @@ type PRegNode {
   minting_logic_script: Credential,
   transfer_logic_script: Credential,
   third_party_transfer_logic_script: Credential,
+  /// CIP-113 v0.4.0 field 5. `VerificationKey(#"")` means unfracking is
+  /// FORBIDDEN for this policy — core's least-permission default.
+  unfracking_logic_script: Credential,
   global_state_cs: ByteArray,
 }
 
@@ -287,6 +291,7 @@ fn p_registry_ref_input() -> Input {
     minting_logic_script: Script(p_minting_hash),
     transfer_logic_script: Script(p_transfer_hash),
     third_party_transfer_logic_script: Script(p_third_party_hash),
+    unfracking_logic_script: VerificationKey(#""),
     global_state_cs: p_gs_policy,
   }
   Input {
@@ -419,6 +424,7 @@ fn p_dest_action() -> ThirdPartyDestinationAction {
 
 fn p_redeemer() -> ThirdPartyTransferLogicScriptWithdrawRedeemer {
   ThirdPartyTransferLogicScriptWithdrawRedeemer {
+    registry_node_ref_input_index: 0,
     global_state_ref_input_index: 1,
     power_user_node_ref_input_index: 3,
     destination_actions: [p_dest_action()],
