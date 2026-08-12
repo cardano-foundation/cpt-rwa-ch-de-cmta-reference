@@ -192,5 +192,5 @@ For wallets and dApps reading protocol state:
 ## Authors
 
 - **Matteo Coppola**, as part of the Finest team.
-- **Giovanni Garguiolo**, Cardano Foundation
+- **Giovanni Gargiulo**, Cardano Foundation
 - **Thomas Kammerlocher**, Cardano Foundation
