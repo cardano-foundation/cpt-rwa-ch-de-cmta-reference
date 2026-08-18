@@ -283,6 +283,8 @@ fn t_gs_datum(
     requires_sender_kyc: req_sender,
     requires_receiver_kyc: req_receiver,
     network_id: 1,
+    minting_script_credential_hash: #"",
+    upgrades_locked: False,
   }
 }
 
