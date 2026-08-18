@@ -132,6 +132,8 @@ pub fn make_minimal_gs_datum(
     requires_receiver_kyc,
     // or Some(...) for merkle tests
     network_id: 0,
+    minting_script_credential_hash: "",
+    upgrades_locked: False,
   }
 }
 

@@ -266,6 +266,8 @@ fn p_gs_ref_input(paused: Bool, deactivated: Bool, req_receiver: Bool) -> Input 
     requires_sender_kyc: False,
     requires_receiver_kyc: req_receiver,
     network_id: 1,
+    minting_script_credential_hash: #"",
+    upgrades_locked: False,
   }
   Input {
     output_reference: p_out_ref(1),

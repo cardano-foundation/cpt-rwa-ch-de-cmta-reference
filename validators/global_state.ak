@@ -16,12 +16,14 @@ use cardano/transaction.{
 use constants
 use types/global_state.{
   AddTrustedEntity, DeactivateContract, GlobalStateDatum,
-  GlobalStateSpendRedeemer, MintSecurity, ModifySecurityInfo, PauseTransfers,
-  RemoveTrustedEntity, RotateAdmin, SetRequiresReceiverKyc, SetRequiresSenderKyc,
-  TrustedEntityMetadata, UpdateMemberRootHash, UpdateTrustedEntity,
-  set_admin_credential_hash, set_deactivated, set_member_root_hash,
-  set_mintable_amount, set_requires_receiver_kyc, set_requires_sender_kyc,
-  set_security_info, set_transfers_paused, set_trusted_entity_vkeys,
+  GlobalStateSpendRedeemer, LockUpgrades, MintSecurity, ModifySecurityInfo,
+  PauseTransfers, RemoveTrustedEntity, RotateAdmin, RotateMintingScript,
+  SetRequiresReceiverKyc, SetRequiresSenderKyc, TrustedEntityMetadata,
+  UpdateMemberRootHash, UpdateTrustedEntity, set_admin_credential_hash,
+  set_deactivated, set_member_root_hash, set_mintable_amount,
+  set_minting_script_credential_hash, set_requires_receiver_kyc,
+  set_requires_sender_kyc, set_security_info, set_transfers_paused,
+  set_trusted_entity_vkeys, set_upgrades_locked,
 }
 use types/power_users.{PowerUser}
 use utils.{must_be_signed_by_credential, quantity_of_policy_id}
@@ -70,6 +72,11 @@ fn sanitise_initial_datum(datum: GlobalStateDatum, self_mint: Value) -> Bool {
     !datum.deactivated,
     datum.mintable_amount >= 0,
     bytearray.length(datum.admin_credential_hash) == 28,
+    bytearray.length(datum.minting_script_credential_hash) == 28,
+    // Born unlocked. Locking is a single admin transaction away, so a
+    // deployment that wants immutability from day one loses nothing — but a
+    // token that started locked could never be corrected at all.
+    !datum.upgrades_locked,
     // network_id is IMMUTABLE and must fit the 1-byte field encoded into every
     // KYC-attestation payload (0–255). An out-of-range value would silently and
     // permanently disable attestation-based transfers.
@@ -448,6 +455,48 @@ validator global_state_spend_validator(
           builtin.equals_data(expected_output_datum, global_state_output_datum),
         }
       }
+      RotateMintingScript { new_minting_script_credential_hash } -> {
+        let expected_output_datum = set_minting_script_credential_hash(
+          input_fields,
+          new_minting_script_credential_hash,
+        )
+        and {
+          no_concurrent_security_mint,
+          address_preserved,
+          nft_preserved,
+          value_preserved,
+          bytearray.length(new_minting_script_credential_hash) == 28,
+          // The one-way upgrade lock closes this path permanently. See
+          // `upgrades_locked` on GlobalStateDatum.
+          !input_datum.upgrades_locked,
+          // Admin-only, single-signature — see the doc comment on
+          // RotateMintingScript: unlike RotateAdmin, the OUTGOING authority's
+          // consent is deliberately not required, since replacing a buggy or
+          // compromised authority is exactly the case this must still work
+          // for. minting_logic_script.ak independently refuses to ever
+          // delegate to itself (own-hash self-authorisation guard), so this
+          // action does not need to defend against that specific value here.
+          must_be_signed_by_credential(self, input_datum.admin_credential_hash),
+          builtin.equals_data(expected_output_datum, global_state_output_datum),
+        }
+      }
+      LockUpgrades -> {
+        let expected_output_datum = set_upgrades_locked(input_fields, True)
+        and {
+          no_concurrent_security_mint,
+          address_preserved,
+          nft_preserved,
+          value_preserved,
+          // One-way: refuse to re-lock, so the action is never a silent
+          // no-op and the transition True->True cannot be used to churn the
+          // UTxO. Nothing anywhere sets this field back to False — every
+          // branch reproduces the datum wholesale and only this branch
+          // touches it — so False is reachable exactly once, at genesis.
+          !input_datum.upgrades_locked,
+          must_be_signed_by_credential(self, input_datum.admin_credential_hash),
+          builtin.equals_data(expected_output_datum, global_state_output_datum),
+        }
+      }
       DeactivateContract -> {
         let expected_output_datum = set_deactivated(input_fields, True)
         and {
@@ -488,7 +537,16 @@ const t_admin: ByteArray =
 const t_gs_script_hash: ByteArray =
   #"dddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
 
+const t_new_admin: ByteArray =
+  #"1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c"
+
 const t_sec_name: ByteArray = "SEC"
+
+const t_minting_script: ByteArray =
+  #"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+
+const t_new_minting_script: ByteArray =
+  #"ffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
 
 fn t_out_ref(ix: Int) -> OutputReference {
   OutputReference {
@@ -511,6 +569,8 @@ fn t_datum(transfers_paused: Bool, deactivated: Bool) -> GlobalStateDatum {
     requires_sender_kyc: False,
     requires_receiver_kyc: False,
     network_id: 1,
+    minting_script_credential_hash: t_minting_script,
+    upgrades_locked: False,
   }
 }
 
@@ -604,6 +664,262 @@ fn run_spend(
     t_out_ref(0),
     tx,
   )
+}
+
+// ── RotateMintingScript — admin-only, single-signature ───────────────────────
+
+fn rotate_minting_script_redeemer(
+  new_minting_script_credential_hash: ByteArray,
+) -> GlobalStateSpendRedeemer {
+  GlobalStateSpendRedeemer {
+    config_ref_input_index: 0,
+    global_state_output_index: 0,
+    action: RotateMintingScript { new_minting_script_credential_hash },
+  }
+}
+
+test rotate_minting_script_succeeds_when_admin_signs() {
+  // Admin alone is sufficient — note the signatory list holds neither the
+  // outgoing nor the incoming authority. Deliberately NOT dual-sig:
+  // replacing a buggy or compromised authority has to work precisely when
+  // that authority can no longer be trusted to co-sign its own removal.
+  let input_datum = t_datum(False, False)
+  let output_datum = GlobalStateDatum {
+    ..input_datum,
+    minting_script_credential_hash: t_new_minting_script,
+    upgrades_locked: False,
+  }
+  run_spend(
+    input_datum,
+    rotate_minting_script_redeemer(t_new_minting_script),
+    t_tx(input_datum, output_datum, [t_admin]),
+  )
+}
+
+test rotate_minting_script_fails_without_admin_signature() {
+  // Deliberately NOT dual-sig: only the admin's signature is checked, so
+  // this must fail on a missing ADMIN signature alone — no signature from
+  // the outgoing minting script is required or checked at all.
+  let input_datum = t_datum(False, False)
+  let output_datum = GlobalStateDatum {
+    ..input_datum,
+    minting_script_credential_hash: t_new_minting_script,
+    upgrades_locked: False,
+  }
+  !run_spend(
+    input_datum,
+    rotate_minting_script_redeemer(t_new_minting_script),
+    t_tx(input_datum, output_datum, []),
+  )
+}
+
+test rotate_minting_script_cannot_smuggle_another_field_change() {
+  // A rotation must change exactly one field. Without the whole-datum
+  // equality check an admin-signed rotation would be a carrier for any
+  // other datum edit — e.g. silently raising the supply cap alongside it.
+  let input_datum = t_datum(False, False)
+  let output_datum = GlobalStateDatum {
+    ..input_datum,
+    minting_script_credential_hash: t_new_minting_script,
+    upgrades_locked: False,
+    mintable_amount: input_datum.mintable_amount + 1_000_000,
+  }
+  !run_spend(
+    input_datum,
+    rotate_minting_script_redeemer(t_new_minting_script),
+    t_tx(input_datum, output_datum, [t_admin]),
+  )
+}
+
+test rotate_admin_succeeds_when_both_sign() {
+  // Dual-sig by design: requiring the INCOMING admin's signature too proves
+  // the new credential is live, so a typo cannot strand the protocol with an
+  // admin nobody controls.
+  let input_datum = t_datum(False, False)
+  let output_datum = GlobalStateDatum {
+    ..input_datum,
+    admin_credential_hash: t_new_admin,
+  }
+  run_spend(
+    input_datum,
+    rotate_admin_redeemer(t_new_admin),
+    t_tx(input_datum, output_datum, [t_admin, t_new_admin]),
+  )
+}
+
+test rotate_admin_fails_without_outgoing_admin_signature() {
+  // Blocks silent takeover: whoever holds the new key cannot install it alone.
+  let input_datum = t_datum(False, False)
+  let output_datum = GlobalStateDatum {
+    ..input_datum,
+    admin_credential_hash: t_new_admin,
+  }
+  !run_spend(
+    input_datum,
+    rotate_admin_redeemer(t_new_admin),
+    t_tx(input_datum, output_datum, [t_new_admin]),
+  )
+}
+
+test rotate_admin_fails_without_incoming_admin_signature() {
+  // The lost-key soft-brick guard: the outgoing admin alone cannot hand the
+  // protocol to a credential that has not proven it can sign.
+  let input_datum = t_datum(False, False)
+  let output_datum = GlobalStateDatum {
+    ..input_datum,
+    admin_credential_hash: t_new_admin,
+  }
+  !run_spend(
+    input_datum,
+    rotate_admin_redeemer(t_new_admin),
+    t_tx(input_datum, output_datum, [t_admin]),
+  )
+}
+
+test rotate_admin_cannot_smuggle_another_field_change() {
+  let input_datum = t_datum(False, False)
+  let output_datum = GlobalStateDatum {
+    ..input_datum,
+    admin_credential_hash: t_new_admin,
+    mintable_amount: input_datum.mintable_amount + 1_000_000,
+  }
+  !run_spend(
+    input_datum,
+    rotate_admin_redeemer(t_new_admin),
+    t_tx(input_datum, output_datum, [t_admin, t_new_admin]),
+  )
+}
+
+fn rotate_admin_redeemer(
+  new_admin_credential_hash: ByteArray,
+) -> GlobalStateSpendRedeemer {
+  GlobalStateSpendRedeemer {
+    config_ref_input_index: 0,
+    global_state_output_index: 0,
+    action: RotateAdmin { new_admin_credential_hash },
+  }
+}
+
+test rotate_minting_script_fails_when_length_invalid() {
+  let input_datum = t_datum(False, False)
+  let bad_hash = #"ab"
+  let output_datum = GlobalStateDatum {
+    ..input_datum,
+    minting_script_credential_hash: bad_hash,
+    upgrades_locked: False,
+  }
+  !run_spend(
+    input_datum,
+    rotate_minting_script_redeemer(bad_hash),
+    t_tx(input_datum, output_datum, [t_admin]),
+  )
+}
+
+test deactivated_input_rejects_rotate_minting_script() fail {
+  let input_datum = t_datum(True, True)
+  let output_datum = GlobalStateDatum {
+    ..input_datum,
+    minting_script_credential_hash: t_new_minting_script,
+    upgrades_locked: False,
+  }
+  run_spend(
+    input_datum,
+    rotate_minting_script_redeemer(t_new_minting_script),
+    t_tx(input_datum, output_datum, [t_admin]),
+  )
+}
+
+// ── LockUpgrades — the one-way upgrade lock ─────────────────────────────────
+
+fn lock_upgrades_redeemer() -> GlobalStateSpendRedeemer {
+  GlobalStateSpendRedeemer {
+    config_ref_input_index: 0,
+    global_state_output_index: 0,
+    action: LockUpgrades,
+  }
+}
+
+fn t_datum_locked() -> GlobalStateDatum {
+  GlobalStateDatum { ..t_datum(False, False), upgrades_locked: True }
+}
+
+test lock_upgrades_succeeds_when_admin_signs() {
+  let input_datum = t_datum(False, False)
+  run_spend(
+    input_datum,
+    lock_upgrades_redeemer(),
+    t_tx(input_datum, t_datum_locked(), [t_admin]),
+  )
+}
+
+test lock_upgrades_fails_without_admin_signature() {
+  let input_datum = t_datum(False, False)
+  !run_spend(
+    input_datum,
+    lock_upgrades_redeemer(),
+    t_tx(input_datum, t_datum_locked(), []),
+  )
+}
+
+test lock_upgrades_is_one_way() {
+  // Re-locking is refused, so the action is never a silent no-op...
+  let input_datum = t_datum_locked()
+  !run_spend(
+    input_datum,
+    lock_upgrades_redeemer(),
+    t_tx(input_datum, t_datum_locked(), [t_admin]),
+  )
+}
+
+test lock_upgrades_cannot_be_undone() {
+  // ...and no action can clear it. Every branch reproduces the datum
+  // wholesale via `equals_data`, and only LockUpgrades touches this field —
+  // which sets it True — so False is reachable exactly once, at genesis.
+  // Attempting to unlock is checked here against LockUpgrades itself; the
+  // whole-datum equality is what blocks every other branch from doing it.
+  let input_datum = t_datum_locked()
+  !run_spend(
+    input_datum,
+    lock_upgrades_redeemer(),
+    t_tx(input_datum, t_datum(False, False), [t_admin]),
+  )
+}
+
+test lock_upgrades_cannot_smuggle_another_field_change() {
+  let input_datum = t_datum(False, False)
+  let output_datum = GlobalStateDatum {
+    ..t_datum_locked(),
+    mintable_amount: input_datum.mintable_amount + 1_000_000,
+  }
+  !run_spend(
+    input_datum,
+    lock_upgrades_redeemer(),
+    t_tx(input_datum, output_datum, [t_admin]),
+  )
+}
+
+test rotate_minting_script_fails_once_upgrades_are_locked() {
+  // The lock closes the minting-authority upgrade path permanently.
+  let input_datum = t_datum_locked()
+  let output_datum = GlobalStateDatum {
+    ..input_datum,
+    minting_script_credential_hash: t_new_minting_script,
+  }
+  !run_spend(
+    input_datum,
+    rotate_minting_script_redeemer(t_new_minting_script),
+    t_tx(input_datum, output_datum, [t_admin]),
+  )
+}
+
+test sanitise_rejects_genesis_that_is_born_locked() {
+  // A token locked at birth could never be corrected at all; locking is one
+  // admin transaction away, so nothing is lost by refusing it here.
+  let datum = GlobalStateDatum {
+    ..sanitise_datum(#"", 1),
+    upgrades_locked: True,
+  }
+  !sanitise_initial_datum(datum, sanitise_mint())
 }
 
 // ── DeactivateContract — success + guard on preconditions ────────────────────
@@ -785,6 +1101,8 @@ fn sanitise_datum(
     requires_sender_kyc: False,
     requires_receiver_kyc: False,
     network_id,
+    minting_script_credential_hash: t_minting_script,
+    upgrades_locked: False,
   }
 }
 
