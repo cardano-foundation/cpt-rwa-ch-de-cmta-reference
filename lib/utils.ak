@@ -6,6 +6,15 @@ use cardano/address.{Credential, Script}
 use cardano/assets.{PolicyId, Value, quantity_of, tokens}
 use cardano/transaction.{InlineDatum, Input, Output, Transaction}
 
+/// Consent from a credential that may legitimately be EITHER a key or a
+/// script — an admin, a power user, an operator. A key signature and a
+/// script's withdraw-0 are equally valid evidence for those.
+///
+/// Do NOT use this where the credential must be a script that independently
+/// re-decides something (i.e. where the point is that specific script's
+/// LOGIC runs). A bare signature satisfies this function, so such a check
+/// would be satisfiable without the script ever executing. Use
+/// `must_run_script_withdrawal` instead — see its doc comment.
 pub fn must_be_signed_by_credential(
   transaction: Transaction,
   credential_hash: ByteArray,
@@ -14,6 +23,24 @@ pub fn must_be_signed_by_credential(
     list.has(transaction.extra_signatories, credential_hash),
     pairs.has_key(transaction.withdrawals, Script(credential_hash)),
   }
+}
+
+/// Strictly "this SCRIPT ran and succeeded in this transaction" — the
+/// withdraw-0 half of `must_be_signed_by_credential`, with the
+/// signature-equivalence deliberately removed.
+///
+/// A script named as a withdrawal key must be executed and must succeed for
+/// the transaction to validate at all (Plutus phase-2 validation is
+/// all-or-nothing across every script purpose in a transaction), so presence
+/// of the key here really does prove that script's own logic approved this
+/// transaction. That is a strictly stronger claim than
+/// `must_be_signed_by_credential` makes, and it is the claim required
+/// wherever one validator delegates a decision to another.
+pub fn must_run_script_withdrawal(
+  transaction: Transaction,
+  script_hash: ByteArray,
+) -> Bool {
+  pairs.has_key(transaction.withdrawals, Script(script_hash))
 }
 
 pub fn safe_list_at(self: List<a>, index: Int) -> a {
@@ -98,18 +125,61 @@ pub fn derive_issuance_policy_id_from_registry_node(
   // The index of the registry node field which is taken into account for checking the correctnes of the registry node
   // and extracting the hashed params which are used to derive the issuance policy id
   registry_node_field_index: Int,
+  // Index into `ref_inputs` naming the registry node for THIS token.
+  registry_node_ref_input_index: Int,
+) -> PolicyId {
+  // The node is addressed BY INDEX rather than located by search. Searching on
+  // the registry policy alone returns the FIRST matching reference input, but
+  // every CIP-113 programmable token's node carries that same policy — so a
+  // transaction touching a second programmable token resolves whichever node
+  // sorts first and then traps on the identity assertion below. Reference
+  // inputs are ledger-sorted by output reference, so off-chain cannot reorder
+  // its way out of it; the caller must say which node is theirs.
+  //
+  // A caller-supplied index grants no privilege: `has_any_nft_strict` still
+  // requires a genuine single-NFT registry-node UTxO, and the identity
+  // assertion still requires that node to name THIS script at the field index.
+  // CIP-113 derives the issuance policy id from the minting-logic hash and the
+  // linked list keys nodes by that policy id, so at most one node can ever
+  // satisfy both. A wrong index only ever traps.
+  let registry_ref_input = safe_list_at(
+    ref_inputs,
+    registry_node_ref_input_index,
+  )
+  derive_issuance_policy_id_from_registry_node_output(
+    registry_ref_input.output,
+    registry_policy_id,
+    credential,
+    registry_node_field_index,
+  )
+}
+
+/// Same derivation, against a registry node given directly as an `Output`.
+///
+/// Steady-state callers reach the node through `reference_inputs` (use the
+/// wrapper above). At CIP-113 registration time, though, the node does not
+/// exist as a spendable UTxO yet — it is an OUTPUT of the very transaction
+/// creating it — so a caller that must resolve the issuance policy during a
+/// registry insert has to read it from `self.outputs` instead.
+///
+/// That is not a weaker source. `has_any_nft_strict` still requires a genuine
+/// registry NFT, and a registry NFT can only enter an output by being minted
+/// (`registry_mint` runs and enforces CIP-113's cryptographic `key` ↔
+/// `minting_logic_script` binding) or by being carried forward from an
+/// existing node (`registry_spend` runs and enforces its own rules). Combined
+/// with the identity assertion below, a node output claiming to belong to
+/// `credential` cannot lie about which policy id it keys.
+pub fn derive_issuance_policy_id_from_registry_node_output(
+  node_output: Output,
+  registry_policy_id: ByteArray,
+  credential: Credential,
+  // The index of the registry node field which is taken into account for checking the correctnes of the registry node
+  // and extracting the hashed params which are used to derive the issuance policy id
+  registry_node_field_index: Int,
 ) -> PolicyId {
   expect Script(hashed_params) = credential
-
-  // Finding the registry node utxo among the reference inputs.
-  // Assuming there aren't many reference inputs, a linear search should be fine.
-  let registry_ref_input = list.expect_find(
-    ref_inputs,
-    fn(input) {
-      assets.has_any_nft_strict(input.output.value, registry_policy_id)
-    },
-  )
-  let registry_raw: Data = expect_inline_datum(registry_ref_input.output)
+  expect assets.has_any_nft_strict(node_output.value, registry_policy_id)
+  let registry_raw: Data = expect_inline_datum(node_output)
   let registry_fields: List<Data> = builtin.unconstr_fields(registry_raw)
   // The indexed registry field holds the script `Credential` of the logic
   // running this withdraw-0 (e.g. CIP-113's `minting_logic_script` /

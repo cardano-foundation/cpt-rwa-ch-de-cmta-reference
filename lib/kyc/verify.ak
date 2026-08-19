@@ -249,6 +249,7 @@ fn test_gs_datum_with_tel(
 ) -> GlobalStateDatum {
   GlobalStateDatum {
     transfers_paused: False,
+    deactivated: False,
     mintable_amount: 0,
     admin_credential_hash: #"",
     power_user_linked_list_policy_id: #"",
@@ -259,6 +260,8 @@ fn test_gs_datum_with_tel(
     requires_sender_kyc: True,
     requires_receiver_kyc: True,
     network_id: test_network_id,
+    minting_script_credential_hash: #"",
+    upgrades_locked: False,
   }
 }
 
@@ -266,6 +269,7 @@ fn test_gs_datum_with_tel(
 fn test_gs_datum_with_root(root: ByteArray) -> GlobalStateDatum {
   GlobalStateDatum {
     transfers_paused: False,
+    deactivated: False,
     mintable_amount: 0,
     admin_credential_hash: #"",
     power_user_linked_list_policy_id: #"",
@@ -276,6 +280,8 @@ fn test_gs_datum_with_root(root: ByteArray) -> GlobalStateDatum {
     requires_sender_kyc: True,
     requires_receiver_kyc: True,
     network_id: test_network_id,
+    minting_script_credential_hash: #"",
+    upgrades_locked: False,
   }
 }
 

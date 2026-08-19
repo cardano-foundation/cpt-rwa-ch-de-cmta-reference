@@ -1,15 +1,21 @@
-/// Withdraw redeemer for the minting_logic_script.
+/// Withdraw redeemer for minting_logic_script.ak — the permanent,
+/// CIP-113-registered PROXY.
 ///
-/// Under the Track 4 refactor, GS is minted at `initCompliance` (not at
-/// register), so GS always exists by the time any security-token mint
-/// runs. The earlier `GlobalStateRef` sum type (`GlobalStateInput` for
-/// steady-state vs `GlobalStateOutputIndex` for genesis) is gone — every
-/// mint now spends the GS UTxO via its input.
+/// The proxy makes exactly one decision: "is the minting authority that
+/// GlobalState currently names running in this transaction?" It therefore
+/// needs exactly one thing from the caller — where to find GlobalState. Every
+/// other decision, and so every other redeemer field, belongs to the
+/// authority (see types/minting_authority.ak).
+///
+/// The two constructors exist only because a UTxO cannot be both spent and
+/// referenced: a mint or burn must SPEND GlobalState (so its `MintSecurity`
+/// branch runs and enforces the supply cap), while a structural registration
+/// merely REFERENCES it. The proxy does not care which of those is happening
+/// — it just needs to read the datum — so it accepts either and leaves the
+/// "was the right one used for this operation?" judgement to the authority.
 pub type MintingLogicScriptWithdrawRedeemer {
-  /// Index into `self.inputs` — the GS UTxO being spent in this tx. Its
-  /// spend validator runs under `MintSecurity`, which enforces the cap.
-  global_state_input_index: Int,
-  power_user_node_ref_input_index: Int,
-  /// Amount minted (signed: positive for mint, negative for burn).
-  minted_amount: Int,
+  /// Index into `self.inputs`.
+  GlobalStateSpent { global_state_input_index: Int }
+  /// Index into `self.reference_inputs`.
+  GlobalStateReferenced { global_state_ref_input_index: Int }
 }

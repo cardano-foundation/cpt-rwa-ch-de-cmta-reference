@@ -1,87 +1,79 @@
-use aiken_design_patterns/linked_list.{get_element_info, run_element_with}
-use cardano/address.{Credential}
-use cardano/assets.{quantity_of}
-use cardano/certificate.{Certificate, RegisterCredential}
-use cardano/transaction.{Input, Output, Transaction}
+use aiken/builtin
+use aiken/collection/dict
+use aiken/interval.{Interval, IntervalBound, NegativeInfinity, PositiveInfinity}
+use cardano/address.{Address, Credential, Script}
+use cardano/assets.{from_asset, from_lovelace, merge, zero}
+use cardano/certificate.{Certificate, RegisterCredential, UnregisterCredential}
+use cardano/transaction.{
+  InlineDatum, Input, NoDatum, Output, OutputReference, Transaction,
+}
 use constants
-use types/minting_logic_script.{MintingLogicScriptWithdrawRedeemer}
-use types/power_users.{PowerUser}
-use utils.{must_be_signed_by_credential}
+use types/global_state.{GlobalStateDatum, gs_datum_from_output}
+use types/minting_logic_script.{
+  GlobalStateReferenced, GlobalStateSpent, MintingLogicScriptWithdrawRedeemer,
+}
+use utils.{must_run_script_withdrawal}
 
-validator minting_logic_validator(
-  security_asset_name: ByteArray,
-  global_state_policy_id: ByteArray,
-  registry_policy_id: ByteArray,
-  power_users_linked_list_policy_id: ByteArray,
-) {
+/// The permanent, CIP-113-registered PROXY for this token's minting path.
+///
+/// Every registry node's `minting_logic_script` field is frozen to this
+/// script's hash forever, and the token's own issuance policy id is derived
+/// from that hash — so nothing in this file can ever change after deployment
+/// without minting a different token. It therefore contains as close to
+/// nothing as is possible: it resolves GlobalState, reads which script is
+/// currently the minting authority, and requires that script to be running
+/// in this transaction. That is the whole validator.
+///
+/// EVERY substantive rule — the supply cap, power-user roles, KYC, denylist,
+/// mint destinations, the CIP-113 registration's structural invariants, the
+/// admin gate, and the guard against riding along on a registry-node update
+/// — lives in validators/minting_authority.ak, which the admin can replace
+/// at any time via `RotateMintingScript`. Maximum upgradability, by
+/// construction: the only thing that can never be fixed is this file, so
+/// this file decides as little as possible.
+///
+/// The corollary, stated plainly because it is the price of that design: a
+/// replacement authority inherits the FULL burden of correctness. Nothing
+/// here will catch its mistakes. See the "INVARIANTS ANY REPLACEMENT
+/// AUTHORITY MUST PRESERVE" note in validators/minting_authority.ak.
+validator minting_logic_validator(global_state_policy_id: ByteArray) {
   withdraw(
     redeemer: MintingLogicScriptWithdrawRedeemer,
     credential: Credential,
     self: Transaction,
   ) {
-    let issuance_policy_id = utils.derive_issuance_policy_id_from_registry_node(
-      self.reference_inputs,
-      registry_policy_id,
-      credential,
-      constants.minting_logic_script_registry_node_index,
-    )
+    expect Script(own_hash) = credential
 
-    let minted_amount = quantity_of(
-      self.mint,
-      issuance_policy_id,
-      security_asset_name,
+    let gs_output: Output = when redeemer is {
+      GlobalStateSpent { global_state_input_index } ->
+        utils.safe_list_at(self.inputs, global_state_input_index).output
+      GlobalStateReferenced { global_state_ref_input_index } ->
+        utils.safe_list_at(self.reference_inputs, global_state_ref_input_index).output
+    }
+    // NFT presence is what makes this the real GlobalState rather than a
+    // datum an attacker fabricated to name an authority they control.
+    let gs_datum: GlobalStateDatum = gs_datum_from_output(
+      gs_output,
+      global_state_policy_id,
     )
-
-    // GS is always spent during a mint under the Track 4 design (GS minted at
-    // initCompliance; register spends-and-updates it via the MintSecurity
-    // branch, which enforces the supply cap). This validator only needs to
-    // assert the GS NFT is actually on the referenced input — NFT presence on
-    // an input implies the GS spend validator is running; by the non-Mint-
-    // branches-reject-mint invariant in global_state.ak, only the MintSecurity
-    // branch permits a security-token mint — and it decrements `mintable_amount`.
-    let gs_input = utils.safe_list_at(
-      self.inputs,
-      redeemer.global_state_input_index,
-    )
-    expect
-      quantity_of(
-        gs_input.output.value,
-        global_state_policy_id,
-        constants.global_state_asset_name,
-      ) == 1
-
-    let power_user_ref_input = utils.safe_list_at(
-      self.reference_inputs,
-      redeemer.power_user_node_ref_input_index,
-    )
-
-    let (power_user_node_key, power_user_data) = get_element_info(
-      power_user_ref_input.output,
-      fn(_lovelace, node_key, data, _link) {
-        expect Some(key) = node_key
-        expect power_user_data: PowerUser = data
-        (key, power_user_data)
-      },
-    )
-      |> run_element_with(
-          power_users_linked_list_policy_id,
-          constants.linked_list_root_key,
-          constants.linked_list_node_key_prefix,
-          constants.linked_list_node_key_prefix_length,
-        )
 
     and {
-      //Redeemer contains the amount just for easy reference for eventual other contracts
-      (minted_amount == redeemer.minted_amount)?,
-      //A power user must have signed the transaction
-      must_be_signed_by_credential(self, power_user_node_key)?,
-      //If minted_amount > 0, power user must be minter
-      //If minted_amount < 0, power user must be burner
-      if minted_amount > 0 {
-        power_user_data.can_mint
-      } else {
-        power_user_data.can_burn
-      }?,
+      // Decline if the protocol is deactivated
+      (gs_datum.deactivated == False)?,
+      // Self-authorisation footgun: this withdraw-0 is, by construction,
+      // always present while this code is running, so an authority hash
+      // equal to `own_hash` would be trivially self-satisfying. No
+      // circularity concern — `own_hash` is a runtime value from
+      // `credential`, not a compile-time parameter.
+      (gs_datum.minting_script_credential_hash != own_hash)?,
+      // Deliberately `must_run_script_withdrawal`, NOT
+      // `must_be_signed_by_credential`: the latter also accepts a bare key
+      // signature, which would satisfy this gate without the authority
+      // script ever executing — and since this proxy checks nothing else at
+      // all, that would be a total bypass of every rule the token has. Only
+      // a genuine withdraw-0 proves the authority's own logic ran and
+      // approved this specific transaction.
+      must_run_script_withdrawal(self, gs_datum.minting_script_credential_hash)?,
     }
   }
 
@@ -102,323 +94,280 @@ validator minting_logic_validator(
     fail
   }
 }
-// ── Test constants ───────────────────────────────────────────────────────────
 
-// const test_security_asset_name: ByteArray = "SEC"
+// ============================================================================
+// Tests — the whole validator is one delegation decision, so these cover
+// exactly that: can the gate be satisfied by anything other than the
+// currently-named authority genuinely running?
+// ============================================================================
 
-// // 28-byte stand-ins for the three script hashes the validator is parameterised
-// // on, plus the power-user credential and the script-applied hashed parameter.
-// const test_gs_policy_id: ByteArray =
-//   #"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+const test_gs_policy_id: ByteArray =
+  #"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
-// const test_pu_policy_id: ByteArray =
-//   #"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+// This proxy's own credential, as the ledger passes it to `withdraw`.
+const test_minting_logic_hash: ByteArray =
+  #"f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1"
 
-// const test_pu_credential_hash: ByteArray =
-//   #"cccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+// The currently-active minting authority (validators/minting_authority.ak),
+// as named by GlobalState.minting_script_credential_hash.
+const test_minting_authority_hash: ByteArray =
+  #"06060606060606060606060606060606060606060606060606060606"
 
-// const test_hashed_param: ByteArray =
-//   #"dddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+// A second, distinct authority — what `RotateMintingScript` points
+// GlobalState at. Used to prove rotation actually re-points the delegation.
+const test_new_minting_authority_hash: ByteArray =
+  #"07070707070707070707070707070707070707070707070707070707"
 
-// // Arbitrary prefix/postfix bytes — apply_hashed_parameter is hashed at test
-// // time to obtain the issuance policy id the mint must use.
-// const test_issuance_prefix: ByteArray = #"4d01000033222233"
+fn test_out_ref(ix: Int) -> OutputReference {
+  OutputReference {
+    transaction_id: #"0000000000000000000000000000000000000000000000000000000000000000",
+    output_index: ix,
+  }
+}
 
-// const test_issuance_postfix: ByteArray = #"0001"
+fn make_gs_output(authority: ByteArray, deactivated: Bool) -> Output {
+  let gs_datum = GlobalStateDatum {
+    transfers_paused: False,
+    deactivated,
+    mintable_amount: 1_000_000,
+    admin_credential_hash: #"",
+    power_user_linked_list_policy_id: #"",
+    denylist_linked_list_policy_id: #"",
+    security_info: builtin.constr_data(0, []),
+    trusted_entity_vkeys: [],
+    member_root_hash: #"",
+    requires_sender_kyc: False,
+    requires_receiver_kyc: False,
+    network_id: 1,
+    minting_script_credential_hash: authority,
+    upgrades_locked: False,
+  }
+  Output {
+    address: Address {
+      payment_credential: Script(test_gs_policy_id),
+      stake_credential: None,
+    },
+    value: merge(
+      from_lovelace(2_000_000),
+      from_asset(test_gs_policy_id, constants.global_state_asset_name, 1),
+    ),
+    datum: InlineDatum(gs_datum),
+    reference_script: None,
+  }
+}
 
-// // ── Test helpers ─────────────────────────────────────────────────────────────
+fn make_gs_input(authority: ByteArray, deactivated: Bool) -> Input {
+  Input {
+    output_reference: test_out_ref(0),
+    output: make_gs_output(authority, deactivated),
+  }
+}
 
-// // fn test_issuance_policy_id() -> PolicyId {
-// //   apply_hashed_parameter(
-// //     test_issuance_prefix,
-// //     test_issuance_postfix,
-// //     test_hashed_param,
-// //   )
-// // }
+fn base_tx() -> Transaction {
+  Transaction {
+    inputs: [],
+    reference_inputs: [],
+    outputs: [],
+    fee: 0,
+    mint: zero,
+    certificates: [],
+    withdrawals: [],
+    validity_range: Interval {
+      lower_bound: IntervalBound {
+        bound_type: NegativeInfinity,
+        is_inclusive: True,
+      },
+      upper_bound: IntervalBound {
+        bound_type: PositiveInfinity,
+        is_inclusive: False,
+      },
+    },
+    extra_signatories: [],
+    redeemers: [],
+    datums: dict.empty,
+    id: #"0000000000000000000000000000000000000000000000000000000000000000",
+    votes: [],
+    proposal_procedures: [],
+    current_treasury_amount: None,
+    treasury_donation: None,
+  }
+}
 
-// // fn test_out_ref(ix: Int) -> OutputReference {
-// //   OutputReference {
-// //     transaction_id: #"0000000000000000000000000000000000000000000000000000000000000000",
-// //     output_index: ix,
-// //   }
-// // }
+// GS spent (the mint/burn shape), with the named authority's withdraw-0
+// present or absent.
+fn spent_tx(authority: ByteArray, withdrawal: Option<ByteArray>) -> Transaction {
+  Transaction {
+    ..base_tx(),
+    inputs: [make_gs_input(authority, False)],
+    withdrawals: when withdrawal is {
+      Some(h) -> [Pair(Script(h), 0)]
+      None -> []
+    },
+  }
+}
 
-// // // GS input — only the NFT presence matters here; the spend validator handles
-// // // the cap. Datum is not read by minting_logic_validator.
-// // fn make_gs_input() -> Input {
-// //   Input {
-// //     output_reference: test_out_ref(0),
-// //     output: Output {
-// //       address: Address {
-// //         payment_credential: Script(test_gs_policy_id),
-// //         stake_credential: None,
-// //       },
-// //       value: merge(
-// //         from_lovelace(2_000_000),
-// //         from_asset(test_gs_policy_id, constants.global_state_asset_name, 1),
-// //       ),
-// //       datum: NoDatum,
-// //       reference_script: None,
-// //     },
-// //   }
-// // }
+fn run_withdraw(redeemer: MintingLogicScriptWithdrawRedeemer, tx: Transaction) {
+  minting_logic_validator.withdraw(
+    test_gs_policy_id,
+    redeemer,
+    Script(test_minting_logic_hash),
+    tx,
+  )
+}
 
-// // // Linked-list node ref input: asset name = "Node" ++ credential_hash, datum
-// // // is an Element wrapping a PowerUser as Node data. authenticate_element_utxo
-// // // requires exactly ada + 1 NFT in the value.
-// // fn make_pu_node_ref_input(can_mint: Bool, can_burn: Bool) -> Input {
-// //   let pu =
-// //     PowerUser {
-// //       credential_hash: test_pu_credential_hash,
-// //       is_admin: False,
-// //       can_mint,
-// //       can_burn,
-// //       can_pause: False,
-// //       can_force_transfer: False,
-// //     }
-// //   let datum = Element { data: Node { data: pu }, link: None }
-// //   let node_asset_name =
-// //     bytearray.concat(
-// //       constants.linked_list_node_key_prefix,
-// //       test_pu_credential_hash,
-// //     )
-// //   Input {
-// //     output_reference: test_out_ref(1),
-// //     output: Output {
-// //       address: Address {
-// //         payment_credential: Script(test_pu_policy_id),
-// //         stake_credential: None,
-// //       },
-// //       value: merge(
-// //         from_lovelace(2_000_000),
-// //         from_asset(test_pu_policy_id, node_asset_name, 1),
-// //       ),
-// //       datum: InlineDatum(datum),
-// //       reference_script: None,
-// //     },
-// //   }
-// // }
+fn spent_redeemer() -> MintingLogicScriptWithdrawRedeemer {
+  GlobalStateSpent { global_state_input_index: 0 }
+}
 
-// // // IssuanceCborHex ref input — derive_token_policy locates it by NFT, reads
-// // // its inline datum, and hashes (prefix ++ hashed_param ++ postfix) to obtain
-// // // the security-token policy id.
-// // fn make_issuance_ref_input() -> Input {
-// //   let datum =
-// //     IssuanceCborHex {
-// //       prefix_cbor_hex: test_issuance_prefix,
-// //       postfix_cbor_hex: test_issuance_postfix,
-// //     }
-// //   Input {
-// //     output_reference: test_out_ref(2),
-// //     output: Output {
-// //       address: Address {
-// //         payment_credential: Script(env.issuance_cbor_hex_policy_id),
-// //         stake_credential: None,
-// //       },
-// //       value: from_asset(
-// //         env.issuance_cbor_hex_policy_id,
-// //         issuance_cbor_hex_token_name,
-// //         1,
-// //       ),
-// //       datum: InlineDatum(datum),
-// //       reference_script: None,
-// //     },
-// //   }
-// // }
-// fn make_withdraw_tx(
-//   minted_amount: Int,
-//   can_mint: Bool,
-//   can_burn: Bool,
-//   signatories: List<ByteArray>,
-// ) -> Transaction {
-//   Transaction {
-//     inputs: [make_gs_input()],
-//     reference_inputs: [
-//       make_pu_node_ref_input(can_mint, can_burn),
-//       make_issuance_ref_input(),
-//     ],
-//     outputs: [],
-//     fee: 0,
-//     mint: from_asset(
-//       test_issuance_policy_id(),
-//       test_security_asset_name,
-//       minted_amount,
-//     ),
-//     certificates: [],
-//     withdrawals: [],
-//     validity_range: Interval {
-//       lower_bound: IntervalBound {
-//         bound_type: NegativeInfinity,
-//         is_inclusive: True,
-//       },
-//       upper_bound: IntervalBound {
-//         bound_type: PositiveInfinity,
-//         is_inclusive: False,
-//       },
-//     },
-//     extra_signatories: signatories,
-//     redeemers: [],
-//     datums: dict.empty,
-//     id: #"0000000000000000000000000000000000000000000000000000000000000000",
-//     votes: [],
-//     proposal_procedures: [],
-//     current_treasury_amount: None,
-//     treasury_donation: None,
-//   }
-// }
-// // ── withdraw — critical paths ────────────────────────────────────────────────
+// ── the delegation gate ──────────────────────────────────────────────────────
 
-// test withdraw_succeeds_for_mint() {
-//   let amount = 1_000
-//   let redeemer =
-//     MintingLogicScriptWithdrawRedeemer {
-//       global_state_input_index: 0,
-//       power_user_node_ref_input_index: 0,
-//       minted_amount: amount,
-//     }
-//   minting_logic_validator.withdraw(
-//     test_security_asset_name,
-//     test_gs_policy_id,
-//     test_pu_policy_id,
-//     redeemer,
-//     Script(test_hashed_param),
-//     make_withdraw_tx(amount, True, False, [test_pu_credential_hash]),
-//   )
-// }
+test succeeds_when_the_named_authority_runs() {
+  run_withdraw(
+    spent_redeemer(),
+    spent_tx(test_minting_authority_hash, Some(test_minting_authority_hash)),
+  )
+}
 
-// test withdraw_succeeds_for_burn() {
-//   let amount = -1_000
-//   let redeemer =
-//     MintingLogicScriptWithdrawRedeemer {
-//       global_state_input_index: 0,
-//       power_user_node_ref_input_index: 0,
-//       minted_amount: amount,
-//     }
-//   minting_logic_validator.withdraw(
-//     test_security_asset_name,
-//     test_gs_policy_id,
-//     test_pu_policy_id,
-//     redeemer,
-//     Script(test_hashed_param),
-//     make_withdraw_tx(amount, False, True, [test_pu_credential_hash]),
-//   )
-// }
+test succeeds_when_global_state_is_only_referenced() {
+  // A structural registration references GS rather than spending it. The
+  // proxy accepts either — deciding which is appropriate for the operation
+  // at hand is the authority's job, not this validator's.
+  run_withdraw(
+    GlobalStateReferenced { global_state_ref_input_index: 0 },
+    Transaction {
+      ..base_tx(),
+      reference_inputs: [make_gs_input(test_minting_authority_hash, False)],
+      withdrawals: [Pair(Script(test_minting_authority_hash), 0)],
+    },
+  )
+}
 
-// // ── withdraw — failure paths ─────────────────────────────────────────────────
-// //
-// // Each test exercises one rejection branch. The first four cover the final
-// // `and { ... }` block (validator returns False — negated via `!`). The last
-// // covers a precondition `expect` that traps before reaching that block, so it
-// // uses the `fail` annotation.
+test fails_without_the_authority_withdrawal() {
+  // This is the entire validator: with no authority running, nothing else
+  // here could possibly authorise anything.
+  !run_withdraw(spent_redeemer(), spent_tx(test_minting_authority_hash, None))
+}
 
-// test withdraw_fails_when_redeemer_amount_mismatch() {
-//   // Mint is 1_000 but redeemer claims 500 — `minted_amount == redeemer.minted_amount` is False.
-//   let redeemer =
-//     MintingLogicScriptWithdrawRedeemer {
-//       global_state_input_index: 0,
-//       power_user_node_ref_input_index: 0,
-//       minted_amount: 500,
-//     }
-//   !minting_logic_validator.withdraw(
-//     test_security_asset_name,
-//     test_gs_policy_id,
-//     test_pu_policy_id,
-//     redeemer,
-//     Script(test_hashed_param),
-//     make_withdraw_tx(1_000, True, False, [test_pu_credential_hash]),
-//   )
-// }
+test fails_when_the_authority_is_merely_signed_for() {
+  // The gate must accept ONLY a real withdraw-0 of the named script, never a
+  // bare signature — `must_be_signed_by_credential` treats the two as
+  // interchangeable, which here would let the authority be skipped entirely
+  // and, since this proxy checks nothing else, bypass every rule the token
+  // has.
+  !run_withdraw(
+    spent_redeemer(),
+    Transaction {
+      ..spent_tx(test_minting_authority_hash, None),
+      extra_signatories: [test_minting_authority_hash],
+    },
+  )
+}
 
-// test withdraw_fails_when_not_signed_by_power_user() {
-//   // No extra_signatories and no script-withdrawal → must_be_signed_by_credential = False.
-//   let amount = 1_000
-//   let redeemer =
-//     MintingLogicScriptWithdrawRedeemer {
-//       global_state_input_index: 0,
-//       power_user_node_ref_input_index: 0,
-//       minted_amount: amount,
-//     }
-//   !minting_logic_validator.withdraw(
-//     test_security_asset_name,
-//     test_gs_policy_id,
-//     test_pu_policy_id,
-//     redeemer,
-//     Script(test_hashed_param),
-//     make_withdraw_tx(amount, True, False, []),
-//   )
-// }
+test fails_when_a_different_script_runs() {
+  // An unrelated script's withdraw-0 is not the named authority's.
+  !run_withdraw(
+    spent_redeemer(),
+    spent_tx(test_minting_authority_hash, Some(test_new_minting_authority_hash)),
+  )
+}
 
-// test withdraw_fails_when_minting_without_mint_permission() {
-//   // minted_amount > 0 selects the `can_mint` branch, but the power user lacks it.
-//   let amount = 1_000
-//   let redeemer =
-//     MintingLogicScriptWithdrawRedeemer {
-//       global_state_input_index: 0,
-//       power_user_node_ref_input_index: 0,
-//       minted_amount: amount,
-//     }
-//   !minting_logic_validator.withdraw(
-//     test_security_asset_name,
-//     test_gs_policy_id,
-//     test_pu_policy_id,
-//     redeemer,
-//     Script(test_hashed_param),
-//     make_withdraw_tx(amount, False, True, [test_pu_credential_hash]),
-//   )
-// }
+test fails_when_the_authority_is_this_proxy_itself() {
+  // Self-authorisation footgun: this withdraw-0 is always present while this
+  // code runs, so `own_hash` as the authority would be free.
+  !run_withdraw(
+    spent_redeemer(),
+    spent_tx(test_minting_logic_hash, Some(test_minting_logic_hash)),
+  )
+}
 
-// test withdraw_fails_when_burning_without_burn_permission() {
-//   // minted_amount < 0 selects the `can_burn` branch, but the power user lacks it.
-//   let amount = -1_000
-//   let redeemer =
-//     MintingLogicScriptWithdrawRedeemer {
-//       global_state_input_index: 0,
-//       power_user_node_ref_input_index: 0,
-//       minted_amount: amount,
-//     }
-//   !minting_logic_validator.withdraw(
-//     test_security_asset_name,
-//     test_gs_policy_id,
-//     test_pu_policy_id,
-//     redeemer,
-//     Script(test_hashed_param),
-//     make_withdraw_tx(amount, True, False, [test_pu_credential_hash]),
-//   )
-// }
+// ── the upgrade property ─────────────────────────────────────────────────────
 
-// test withdraw_fails_when_gs_nft_missing() fail {
-//   // Replace the GS input with a UTxO that has no GS NFT — the `expect
-//   // quantity_of(...) == 1` precondition traps.
-//   let bogus_gs_input =
-//     Input {
-//       output_reference: test_out_ref(0),
-//       output: Output {
-//         address: Address {
-//           payment_credential: Script(test_gs_policy_id),
-//           stake_credential: None,
-//         },
-//         value: from_lovelace(2_000_000),
-//         datum: NoDatum,
-//         reference_script: None,
-//       },
-//     }
-//   let tx =
-//     Transaction {
-//       ..make_withdraw_tx(1_000, True, False, [test_pu_credential_hash]),
-//       inputs: [bogus_gs_input],
-//     }
-//   let redeemer =
-//     MintingLogicScriptWithdrawRedeemer {
-//       global_state_input_index: 0,
-//       power_user_node_ref_input_index: 0,
-//       minted_amount: 1_000,
-//     }
-//   minting_logic_validator.withdraw(
-//     test_security_asset_name,
-//     test_gs_policy_id,
-//     test_pu_policy_id,
-//     redeemer,
-//     Script(test_hashed_param),
-//     tx,
-//   )
-// }
+test superseded_authority_stops_working_after_rotation() {
+  // Which script satisfies the gate is read live from GlobalState on every
+  // transaction, so rotating `minting_script_credential_hash` genuinely
+  // re-points the delegation — otherwise a superseded (e.g. compromised)
+  // authority would keep working forever and "rotation" would be cosmetic.
+  !run_withdraw(
+    spent_redeemer(),
+    spent_tx(test_new_minting_authority_hash, Some(test_minting_authority_hash)),
+  )
+}
+
+test rotated_authority_starts_working() {
+  // Positive mirror of the test above, same GlobalState.
+  run_withdraw(
+    spent_redeemer(),
+    spent_tx(
+      test_new_minting_authority_hash,
+      Some(test_new_minting_authority_hash),
+    ),
+  )
+}
+
+// ── GlobalState authentication ───────────────────────────────────────────────
+
+test fails_when_global_state_is_forged() fail {
+  // Without the NFT check an attacker could supply any UTxO carrying a
+  // GlobalState-shaped datum that names an authority they control, and the
+  // gate would happily delegate to it.
+  let forged = Output {
+    ..make_gs_output(test_new_minting_authority_hash, False),
+    value: from_lovelace(2_000_000),
+  }
+  run_withdraw(
+    spent_redeemer(),
+    Transaction {
+      ..base_tx(),
+      inputs: [Input { output_reference: test_out_ref(0), output: forged }],
+      withdrawals: [Pair(Script(test_new_minting_authority_hash), 0)],
+    },
+  )
+}
+
+test fails_when_index_points_at_a_non_global_state_utxo() fail {
+  let unrelated = Output {
+    address: Address {
+      payment_credential: Script(test_gs_policy_id),
+      stake_credential: None,
+    },
+    value: from_lovelace(2_000_000),
+    datum: NoDatum,
+    reference_script: None,
+  }
+  run_withdraw(
+    spent_redeemer(),
+    Transaction {
+      ..spent_tx(test_minting_authority_hash, Some(test_minting_authority_hash)),
+      inputs: [Input { output_reference: test_out_ref(1), output: unrelated }],
+    },
+  )
+}
+
+// ── publish handler ──────────────────────────────────────────────────────────
+
+test publish_accepts_credential_registration() {
+  minting_logic_validator.publish(
+    test_gs_policy_id,
+    builtin.constr_data(0, []),
+    RegisterCredential {
+      credential: Script(test_minting_logic_hash),
+      deposit: Never,
+    },
+    base_tx(),
+  )
+}
+
+test publish_rejects_credential_deregistration() {
+  // Pins the anti-griefing rule the handler documents: a rubber-stamp publish
+  // would let anyone de-register this script's stake credential for ~2 ADA,
+  // bricking every withdraw-0 mint and burn until it was re-registered.
+  !minting_logic_validator.publish(
+    test_gs_policy_id,
+    builtin.constr_data(0, []),
+    UnregisterCredential {
+      credential: Script(test_minting_logic_hash),
+      refund: Never,
+    },
+    base_tx(),
+  )
+}
