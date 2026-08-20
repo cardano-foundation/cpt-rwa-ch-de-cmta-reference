@@ -1,3 +1,4 @@
+use types/global_state.{GlobalStateLocation}
 use types/kyc_proof.{KycProof}
 
 /// One entry per unique destination (unique stake-credential among outputs
@@ -96,10 +97,16 @@ pub type MintingAuthorityWithdrawRedeemer {
     registry_node_input_index: Int,
     /// Index into `self.outputs` — the continuing node.
     registry_node_output_index: Int,
-    /// Index into `self.reference_inputs` — GlobalState, read for the admin
-    /// credential and the upgrade lock. Referenced rather than spent: no
-    /// supply changes, so there is no cap to enforce.
-    global_state_ref_input_index: Int,
+    /// WHERE GlobalState is — read for the admin credential and the upgrade
+    /// lock, nothing more. Deliberately a location rather than a fixed
+    /// reference index: this variant makes no claim that depends on the GS
+    /// spend validator having run, so pinning it to one list would only forbid
+    /// upgrading a registry node in the same transaction that spends
+    /// GlobalState (Conway rejects the overlap). Contrast `MintBurn` and
+    /// `RegisterMint` below, whose bare `global_state_input_index` is
+    /// load-bearing: they MUST spend, or `MintSecurity` never runs and the
+    /// supply cap goes unenforced. The type carries that distinction.
+    global_state_location: GlobalStateLocation,
   }
   /// A CIP-113 registration that mints nothing — it only creates the registry
   /// node. GlobalState is merely REFERENCED (there is no supply change, so
@@ -109,8 +116,10 @@ pub type MintingAuthorityWithdrawRedeemer {
   RegisterStructural {
     /// Index into `self.outputs` — as in `RegisterMint`.
     registry_node_output_index: Int,
-    /// Index into `self.reference_inputs` — GlobalState, read for the admin
-    /// credential.
-    global_state_ref_input_index: Int,
+    /// WHERE GlobalState is — read for the admin credential only. A location
+    /// for the same reason as `UpgradeRegistryNode`: nothing here depends on
+    /// the GS spend validator running, and a structural registration should
+    /// not be barred from a transaction that also spends GlobalState.
+    global_state_location: GlobalStateLocation,
   }
 }

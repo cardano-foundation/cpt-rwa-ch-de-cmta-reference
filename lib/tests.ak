@@ -190,11 +190,10 @@ pub fn empty_tx() -> Transaction {
 
 test derive_issuance_policy_id_from_cip113_registry_node() {
   let issuance_policy_id = utils.derive_issuance_policy_id_from_registry_node(
-    [make_cip113_registry_ref_input()],
+    make_cip113_registry_ref_input().output,
     test_registry_policy_id,
-    Script(test_transfer_logic_hash),
+    test_transfer_logic_hash,
     constants.transfer_logic_script_registry_node_index,
-    0,
   )
   issuance_policy_id == test_issuance_policy_id
 }

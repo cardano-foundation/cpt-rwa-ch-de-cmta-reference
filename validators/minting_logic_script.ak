@@ -8,9 +8,9 @@ use cardano/transaction.{
   InlineDatum, Input, NoDatum, Output, OutputReference, Transaction,
 }
 use constants
-use types/global_state.{GlobalStateDatum, gs_datum_from_output}
-use types/minting_logic_script.{
-  GlobalStateReferenced, GlobalStateSpent, MintingLogicScriptWithdrawRedeemer,
+use types/global_state.{
+  GlobalStateDatum, GlobalStateLocation, GlobalStateReferenced, GlobalStateSpent,
+  gs_datum_from_output,
 }
 use utils.{must_run_script_withdrawal}
 
@@ -37,13 +37,31 @@ use utils.{must_run_script_withdrawal}
 /// here will catch its mistakes. See the "INVARIANTS ANY REPLACEMENT
 /// AUTHORITY MUST PRESERVE" note in validators/minting_authority.ak.
 validator minting_logic_validator(global_state_policy_id: ByteArray) {
+  /// The redeemer is exactly `GlobalStateLocation` — the proxy needs one thing
+  /// from the caller, where to find GlobalState, and every other decision
+  /// belongs to the authority (see types/minting_authority.ak). It had a
+  /// private two-constructor type of its own until that type and
+  /// `GlobalStateLocation` became byte-for-byte the same declaration; the
+  /// shared one is now the single encoding of "which list is GlobalState in"
+  /// for every validator where the choice is free.
   withdraw(
-    redeemer: MintingLogicScriptWithdrawRedeemer,
+    redeemer: GlobalStateLocation,
     credential: Credential,
     self: Transaction,
   ) {
     expect Script(own_hash) = credential
 
+    // Resolved INLINE rather than through `gs_datum_from_location`, which is
+    // the same logic and is what every other validator here calls.
+    //
+    // This one file may not change its compiled bytes. Its hash is frozen into
+    // every registry node this deployment has ever inserted, and the token's
+    // issuance policy id is derived from it — so a different hash is a
+    // different token, and every already-issued one becomes unreachable. Going
+    // through the shared helper was measured to move the hash
+    // (6defc595… -> b6e4e07a…): same behaviour, different UPLC. The redeemer
+    // TYPE is shared, because a type name is not compiled; the resolution is
+    // not. Do not "tidy" this into the helper without re-checking the hash.
     let gs_output: Output = when redeemer is {
       GlobalStateSpent { global_state_input_index } ->
         utils.safe_list_at(self.inputs, global_state_input_index).output
@@ -206,7 +224,7 @@ fn spent_tx(authority: ByteArray, withdrawal: Option<ByteArray>) -> Transaction 
   }
 }
 
-fn run_withdraw(redeemer: MintingLogicScriptWithdrawRedeemer, tx: Transaction) {
+fn run_withdraw(redeemer: GlobalStateLocation, tx: Transaction) {
   minting_logic_validator.withdraw(
     test_gs_policy_id,
     redeemer,
@@ -215,7 +233,7 @@ fn run_withdraw(redeemer: MintingLogicScriptWithdrawRedeemer, tx: Transaction) {
   )
 }
 
-fn spent_redeemer() -> MintingLogicScriptWithdrawRedeemer {
+fn spent_redeemer() -> GlobalStateLocation {
   GlobalStateSpent { global_state_input_index: 0 }
 }
 

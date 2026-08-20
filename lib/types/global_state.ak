@@ -10,6 +10,30 @@ use utils
 pub type TrustedEntityMetadata =
   Data
 
+/// Where in a transaction the GlobalState UTxO is to be found.
+///
+/// A UTxO cannot be both spent and referenced — Conway rejects a transaction
+/// whose `inputs` and `reference_inputs` overlap — so any validator that only
+/// needs to READ the GlobalState datum must let the caller say which list it
+/// is in, or it silently dictates the shape of every transaction it takes part
+/// in. That is not hypothetical: a burn MUST spend GlobalState (only then does
+/// `global_state_spend_validator`'s `MintSecurity` branch credit the burned
+/// supply back to `mintable_amount`), and any co-running validator hard-wired
+/// to `reference_inputs` makes that burn unbuildable.
+///
+/// Both forms are equally authentic: authenticity comes from the single
+/// GlobalState NFT, which is present wherever the UTxO appears. What the two
+/// forms do NOT share is whether the spend validator ran — so a caller that
+/// needs the datum's constraints ENFORCED (rather than merely read) must
+/// require `GlobalStateSpent` itself; this type deliberately does not decide
+/// that for anyone.
+pub type GlobalStateLocation {
+  /// Index into `transaction.inputs`.
+  GlobalStateSpent { global_state_input_index: Int }
+  /// Index into `transaction.reference_inputs`.
+  GlobalStateReferenced { global_state_ref_input_index: Int }
+}
+
 /// GlobalState datum — authenticated by the single global_state NFT.
 ///
 /// INVARIANT: `transfers_paused` MUST remain at field index 0. The fast
@@ -78,6 +102,14 @@ pub type GlobalStateDatum {
   // Verify instead at deployment and after every rotation, with a smoke test
   // that a mint lacking a power-user signature is REJECTED. The failure mode
   // is silent and fails OPEN, so it will not surface on its own.
+  //
+  // EXTEND THAT SMOKE TEST TO ALL FIVE POWER-USER ROLES. The warning
+  // above is written about this field, but the mechanism is
+  // `utils.must_be_signed_by_credential`, which gates `is_admin`, `can_mint`,
+  // `can_burn`, `can_pause` and `can_force_transfer` identically. Any of those
+  // credentials set to a permissive script hash is satisfiable by a stranger.
+  // After granting or rotating any role, assert that an operation exercising
+  // it without that operator's signature is REJECTED.
   minting_script_credential_hash: ByteArray,
   // ONE-WAY upgrade lock. While False (the genesis value) both upgrade paths
   // are open; once set True by `LockUpgrades` it can never be cleared — no
@@ -366,6 +398,31 @@ pub fn is_deactivated(
   get_deactivated(builtin.unconstr_fields(gs_datum))
 }
 
+/// Resolves GlobalState from wherever the caller says it is, authenticates it
+/// via the GS NFT, and returns its parsed inline datum.
+///
+/// Use this instead of `gs_datum_from_ref_input` in any validator that merely
+/// READS the datum. Pinning such a validator to reference inputs forbids every
+/// transaction that must also spend GlobalState — see `GlobalStateLocation`.
+///
+/// Fails (UPLC error) if: index out of range, NFT missing, datum non-inline,
+/// or datum shape invalid.
+pub fn gs_datum_from_location(
+  inputs: List<Input>,
+  reference_inputs: List<Input>,
+  location: GlobalStateLocation,
+  global_state_policy_id: ByteArray,
+) -> GlobalStateDatum {
+  let gs_output =
+    when location is {
+      GlobalStateSpent { global_state_input_index } ->
+        utils.safe_list_at(inputs, global_state_input_index).output
+      GlobalStateReferenced { global_state_ref_input_index } ->
+        utils.safe_list_at(reference_inputs, global_state_ref_input_index).output
+    }
+  gs_datum_from_output(gs_output, global_state_policy_id)
+}
+
 /// Resolves the GS reference input at `ref_index`, authenticates it via the GS
 /// NFT, and returns its parsed inline datum. Helper for validators (power_users,
 /// denylist) that read protocol state from the GS datum instead of holding a
@@ -409,21 +466,15 @@ pub fn gs_datum_from_output(
   gs
 }
 
-/// Convenience accessor: the current admin credential hash from the GS datum at
-/// `ref_index`. Used by admin-gated flows (power-user list lifecycle, denylist
-/// teardown).
-pub fn admin_from_ref_input(
-  reference_inputs: List<Input>,
-  ref_index: Int,
-  global_state_policy_id: ByteArray,
-) -> ByteArray {
-  gs_datum_from_ref_input(reference_inputs, ref_index, global_state_policy_id).admin_credential_hash
-}
-
-/// Like `admin_from_ref_input`, but additionally rejects (traps) if the
-/// protocol is `deactivated`. Used by admin-gated linked-list mutations so a
-/// decommissioned protocol truly executes no further administrative action
-/// (matches the `deactivated` field contract: "no action can be executed").
+/// Read the admin credential from an authenticated GlobalState reference
+/// input, rejecting (trapping) if the protocol is `deactivated`.
+///
+/// Every admin-gated caller uses this one. A plain "read the admin" variant
+/// without the deactivation check existed alongside it and was removed as dead
+/// code — deliberately, so there is no second reader for a future caller to
+/// pick up by mistake. A decommissioned protocol must execute no further
+/// administrative action, matching the `deactivated` field contract ("no
+/// action can be executed").
 pub fn active_admin_from_ref_input(
   reference_inputs: List<Input>,
   ref_index: Int,
@@ -472,6 +523,19 @@ pub type GlobalStateSpendAction {
   /// deliberately not reversible: a lock an admin can lift is not a
   /// commitment. Rejected if already locked, so the action is not a silent
   /// no-op.
+  ///
+  /// ONE NUANCE, recorded rather than blocked. Since `UpgradeRegistryNode`
+  /// takes a `GlobalStateLocation`, an admin may put the lock and a final
+  /// upgrade in the SAME transaction: the upgrade reads GlobalState as a spent
+  /// input, and a spent input is the pre-state, so it sees
+  /// `upgrades_locked == False` and proceeds. The lock still takes effect —
+  /// every LATER transaction is refused.
+  ///
+  /// Not treated as a defect: it needs the admin's own signature, and the same
+  /// admin can always upgrade first and lock second in two transactions, so it
+  /// grants no power that did not already exist. What it does mean is that
+  /// "locked at slot N" does not imply "no upgrade at slot N", only "none after
+  /// it" — worth knowing when auditing the chain.
   LockUpgrades
   /// One-way decommissioning switch. Sets `deactivated = True`. Requires the
   /// contract to already be paused and the admin to sign. Irreversible: no
@@ -483,7 +547,6 @@ pub type GlobalStateSpendAction {
 }
 
 pub type GlobalStateSpendRedeemer {
-  config_ref_input_index: Int,
   global_state_output_index: Int,
   action: GlobalStateSpendAction,
 }
@@ -654,6 +717,10 @@ test gs_setters_round_trip() {
     builtin.equals_data(
       set_member_root_hash(fields, #"cd"),
       GlobalStateDatum { ..d, member_root_hash: #"cd" },
+    ),
+    builtin.equals_data(
+      set_requires_sender_kyc(fields, False),
+      GlobalStateDatum { ..d, requires_sender_kyc: False },
     ),
     builtin.equals_data(
       set_requires_receiver_kyc(fields, False),
