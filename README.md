@@ -70,8 +70,12 @@ issuer and registrar.
 
 ### Review and audit
 
-* **Penetration testing** — two engagements have been carried out; the reports are in
-  [`documents/pentesting/`](documents/pentesting/).
+* **Penetration testing** — two engagements have been carried out by FT Labs, on 23 and 26 June
+  2026, against commits `dd2b754` and `1beeed6` respectively; the reports are in
+  [`documents/pentesting/`](documents/pentesting/). The 2026-08-19/20 internal review and its
+  fixes ([`documents/security/security-fixes.md`](documents/security/security-fixes.md)), the
+  minting-proxy upgradability, and the `GlobalStateLocation` change all postdate both engagements,
+  so neither report covers the current code.
 * **Formal security audit** — an official third-party audit is **planned and not yet completed**.
   Until it has been, treat this code as unaudited.
 * **Internal security review** — an adversarial self-review of the compliance layer found and fixed
@@ -136,7 +140,7 @@ issuer and registrar.
 
 ## Building the scripts
 
-Requires Aiken **v1.1.22**, pinned in [`aiken.toml`](aiken.toml) and matched by CI.
+Requires Aiken **v1.1.23**, pinned in [`aiken.toml`](aiken.toml) and matched by CI.
 Both linked lists are built on `anastasia-labs/aiken-design-patterns` **v1.8.0**.
 
 ```sh
@@ -165,10 +169,10 @@ validators. The table below is exhaustive and lists, for every validator, its pa
 exact order the blueprint (`plutus.json`) declares them; apply top to bottom.
 
 > `aiken blueprint apply` takes parameters **positionally, one at a time**, and shared parameters
-> are **not** in a shared order across validators — e.g. row 9 (`third_party_transfer_logic_validator`)
-> lists `power_users_linked_list_policy_id` before `global_state_policy_id`, while row 10
-> (`minting_authority_validator`) lists them the other way round. Always follow this validator's own
-> row below; never assume a "usual" order.
+> are **not** in a shared order across validators — e.g. row 7 (`global_state_spend_validator`)
+> lists the issuance policy id before `global_state_policy_id`, while rows 8–10 list
+> `global_state_policy_id` first. Always follow this validator's own row below; never assume a
+> "usual" order.
 
 | # | Validator | Parameters (blueprint order) | Source |
 |---|---|---|---|
@@ -179,9 +183,9 @@ exact order the blueprint (`plutus.json`) declares them; apply top to bottom.
 | 5 | `denylist.denylist_validator` (spend) | `denylist_linked_list_policy_id` | The hash of `denylist.mint` (row 4) — this is the **denylist policy ID**. |
 | 6 | `minting_logic_script.minting_logic_validator` | `global_state_policy_id` | Row 1. Its only parameter. |
 | 7 | `global_state.global_state_spend_validator` (spend) | `security_asset_name`, `issuance_policy_id`, `global_state_policy_id`, `power_user_list_script_hash` | Operator choice; the hash of `minting_logic_validator` (row 6) — the **issuance policy ID**, i.e. the security token's policy ID; row 1; the hash of `power_users_validator` (row 3). |
-| 8 | `transfer_logic_script.transfer_logic_validator` | `security_asset_name`, `global_state_policy_id`, `registry_policy_id`, `expected_issuance_policy_id`, `denylist_script_hash`, `plb_script_hash` | Operator choice; row 1; Prerequisites; the hash of `minting_logic_validator` (row 6); the hash of `denylist_validator` (row 5); Prerequisites. |
-| 9 | `third_party_transfer_logic_script.third_party_transfer_logic_validator` | `security_asset_name`, `power_users_linked_list_policy_id`, `global_state_policy_id`, `registry_policy_id`, `expected_issuance_policy_id`, `denylist_script_hash`, `power_user_list_script_hash`, `plb_script_hash` | Operator choice; the hash of `power_users.mint` (row 2); row 1; Prerequisites; row 6's hash; row 5's hash; row 3's hash; Prerequisites. |
-| 10 | `minting_authority.minting_authority_validator` | `security_asset_name`, `global_state_policy_id`, `registry_policy_id`, `power_users_linked_list_policy_id`, `minting_logic_script_credential_hash`, `expected_issuance_policy_id`, `plb_script_hash`, `denylist_script_hash`, `power_user_list_script_hash`, `reference_asset_name` | Operator choice; row 1; Prerequisites; row 2's hash; row 6's hash; row 6's hash again (**must be identical to the previous value** — see below); Prerequisites; row 5's hash; row 3's hash; operator choice (see below). |
+| 8 | `transfer_logic_script.transfer_logic_validator` | `security_asset_name`, `global_state_policy_id`, `expected_issuance_policy_id`, `denylist_script_hash` | Operator choice; row 1; the hash of `minting_logic_validator` (row 6); the hash of `denylist_validator` (row 5). |
+| 9 | `third_party_transfer_logic_script.third_party_transfer_logic_validator` | `security_asset_name`, `global_state_policy_id`, `expected_issuance_policy_id`, `denylist_script_hash`, `power_user_list_script_hash`, `plb_script_hash` | Operator choice; row 1; row 6's hash; row 5's hash; row 3's hash; Prerequisites. (The power-users policy id is read from the GlobalState datum at run time, not compiled in.) |
+| 10 | `minting_authority.minting_authority_validator` | `security_asset_name`, `global_state_policy_id`, `registry_policy_id`, `power_users_linked_list_policy_id`, `minting_logic_script_credential_hash`, `expected_issuance_policy_id`, `denylist_script_hash`, `power_user_list_script_hash`, `reference_asset_name` | Operator choice; row 1; Prerequisites; row 2's hash; row 6's hash; row 6's hash again (**must be identical to the previous value** — see below); row 5's hash; row 3's hash; operator choice (see below). |
 
 ### What the derived parameters must equal
 
@@ -204,11 +208,20 @@ exact order the blueprint (`plutus.json`) declares them; apply top to bottom.
 
 ### Deployment: reference scripts
 
-`transfer_logic_validator` (~6.1 KB), `third_party_transfer_logic_validator` (~6.7 KB) and
-`minting_authority_validator` (~8.4 KB) are withdraw-0 scripts executed on every transfer, seizure
-and mint respectively, so they must be published once as reference-script UTxOs and supplied via
-reference inputs — not inlined (a transaction is capped at 16 KiB). The two list `mint` validators
+Four validators are withdraw-0 scripts, i.e. they run as zero-value withdrawals rather than as the
+spending or minting script of any UTxO: `transfer_logic_validator` (~6.1 KB, every transfer),
+`third_party_transfer_logic_validator` (~6.7 KB, every seizure), `minting_authority_validator`
+(~8.4 KB, every mint and burn) and the minting proxy `minting_logic_validator` (~1.1 KB, also every
+mint and burn — the proxy's withdraw-0 is what the CIP-113 registry node invokes, and it in turn
+requires the authority's). The three large ones must be published once as reference-script UTxOs and
+supplied via reference inputs — not inlined (a transaction is capped at 16 KiB); the proxy is small
+enough to inline but is simplest to publish alongside them. The two list `mint` validators
 (~4.7–5.2 KB) should in practice be treated the same way.
+
+All four withdraw-0 scripts need their **stake credential registered** on chain before the first
+transaction that names them in `withdrawals` — see step 4 of [Initialising a token](#initialising-a-token).
+A withdrawal from an unregistered credential is rejected by the ledger at phase 1, before any script
+runs, so forgetting the proxy's registration makes every mint and burn fail from genesis on.
 
 > **The list SCRIPT hashes are not the list POLICY IDs.** Each list file declares a `mint` validator
 > and a separate spend validator, so their hashes differ. Passing a policy ID where a script hash is
@@ -220,6 +233,71 @@ reference inputs — not inlined (a transaction is capped at 16 KiB). The two li
 > `global_state_spend_validator`'s address. The on-chain code checks what it can (the IDs must
 > differ and be 28 bytes) but cannot bind an ID to a hash, and the genesis mint validator cannot see
 > its own spend counterpart's address.
+
+### What is delegated to the CIP-113 base layer
+
+This deployment's own scripts do not re-check everything the CIP-113 base layer already enforces
+independently. In plain terms, the base layer guarantees:
+
+* **Custody on mint.** `issuance_mint`'s `no_escape` rule keeps every newly minted token inside the
+  programmable base and forces an inline stake credential onto every programmable-base output.
+* **Custody on ordinary transfer.** The transfer path requires programmable-base outputs to hold, per
+  policy, at least as much as programmable-base inputs (`tokens.contains(PLB outputs, PLB inputs)`),
+  which — combined with ledger value conservation — keeps the token inside the base.
+* **Registry integrity.** A registry node's key is cryptographically bound to its
+  `minting_logic_script` field, and on an in-place upgrade the base layer itself keeps `key`, `next`
+  and `minting_logic_script` frozen.
+* **Which registry node gets to invoke a logic script.** The base layer authenticates the registry
+  node it uses to dispatch to a logic script's withdraw-0.
+
+Because of the last point, this deployment's transfer, seizure and mint/burn logic no longer read or
+re-derive a registry node at all on those paths — the issuance policy each one polices is pinned at
+compile time instead. And because of the first two points, the mint and ordinary-transfer paths no
+longer re-check programmable-base custody themselves; they rely on the base layer's own guarantees.
+
+**One path is the exception.** The seizure (forced-transfer) path still pins every destination's
+payment credential to the programmable-base script hash, because — unlike the two custody guarantees
+above — that guarantee was not independently verified against the base layer.
+
+These guarantees were verified against CIP-113 base-layer commit `018415d`. Upgrading the deployed
+base layer invalidates that verification and requires re-checking it before relying on this section
+again.
+
+### Execution budget and transaction sizing
+
+Figures below are measured with `aiken bench` (`aiken bench -m "transfer_logic_script.{..}"
+--max-size 40`; the per-test execution units `aiken check` prints are the other source) against the
+current, cost-optimised implementation. They are for this deployment's scripts alone — the CIP-113
+base layer shares the same per-transaction budget, 10 000 M CPU / 14 M memory, and **memory is the
+binding axis**.
+
+* **Ordinary transfer**, denylist-only, one sender and one destination: ≈ 0.61 M mem / 0.18 G CPU.
+  Each further party on a side that cites the same denylist covering node as the party before it
+  adds ≈ 0.10 M mem / 33 M CPU — the node is authenticated once per run of adjacent parties citing
+  it; a party citing a different node pays the full authentication, ≈ 0.15 M mem / 45 M CPU. The
+  dedupe check adds a small quadratic term that matters only beyond ~20 parties per side.
+* **Attestation KYC** adds ≈ 0.06 M mem / 74 M CPU per vetted party (one Ed25519 verification);
+  membership (MPF) proofs are cheaper.
+* **Forced transfer** ≈ 0.60 M mem / 0.18 G CPU with one destination, ≈ 0.10 M mem / 34 M CPU per
+  further destination sharing a node.
+* **Redeemer size** ≈ 32 B per party without KYC, ≈ 370 B per party with attestation proofs — the
+  16 KiB transaction limit binds near 40 attested parties.
+
+`aiken bench -m "transfer_logic_script.{..}" --max-size 40` scales linearly in `n` on both benches
+(`transfer_cost_by_party_count`: `n` senders + `n` destinations, denylist-only, root-only covering
+node; `seizure_cost_by_destination_count`: one seized input, `n` destinations, denylist-only):
+
+| n | transfer mem | transfer CPU | seizure mem | seizure CPU |
+|---:|---:|---:|---:|---:|
+| 1 | 613,128 | 182,775,654 | 602,213 | 182,255,626 |
+| 4 | 1,236,280 | 380,038,077 | 916,780 | 283,133,176 |
+| 8 | 2,125,720 | 696,021,281 | 1,365,488 | 444,119,896 |
+| 16 | 4,182,808 | 1,524,533,481 | 2,402,008 | 864,366,232 |
+
+> **Conservative maxima, at 25% of the budget:** ordinary transfer ≤ 13 unique parties per side
+> denylist-only, ≤ 9 per side with attestation KYC on both sides; seizure ≤ 23 destinations
+> denylist-only, ≤ 16 with receiver KYC. Split larger distributions; keep parties that share a
+> covering node adjacent in the action lists — they follow input/output order.
 
 ## KYC proof formats
 
@@ -273,9 +351,16 @@ deterministic chain and signed in a single batch.
    policy. Nothing validates until this node exists.
 3. **Initialise the linked lists** — mint the root node of the power-users list and of the denylist
    (one transaction each).
-4. **Register the logic scripts' stake credentials** — the three logic validators are invoked as
-   zero-value withdrawals, so their stake credentials must be registered before any transfer, mint
-   or burn can reference them.
+4. **Register the logic scripts' stake credentials** — all **four** withdraw-0 validators are
+   invoked as zero-value withdrawals, so each one's stake credential must be registered before any
+   transfer, mint or burn can reference it: the minting proxy `minting_logic_validator`,
+   `minting_authority_validator`, `transfer_logic_validator` and
+   `third_party_transfer_logic_validator`. Mint and burn need the first two (the proxy's
+   withdraw-0 requires the authority's); transfers need the third; seizures the fourth. A
+   withdrawal from an unregistered credential fails at ledger phase 1 — before any validator runs —
+   so a missing registration surfaces as every such transaction being rejected, not as a script
+   error. Each of these validators' `publish` handler accepts only `RegisterCredential`, so the
+   registration can never be undone by a third party.
 5. **Assign power users** — insert one node per operator, with the role flags that operator should
    hold.
 6. **Mint the initial supply** — spends GlobalState to decrement the cap and mints under the

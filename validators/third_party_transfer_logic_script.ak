@@ -1,7 +1,11 @@
 use aiken/builtin
 use aiken/collection/dict
 use aiken/collection/list
-use aiken/interval.{Interval, IntervalBound, NegativeInfinity, PositiveInfinity}
+use aiken/fuzz
+use aiken/interval.{
+  Finite, Interval, IntervalBound, NegativeInfinity, PositiveInfinity,
+}
+use aiken/merkle_patricia_forestry as mpf
 use aiken/primitive/bytearray
 use aiken_design_patterns/linked_list.{Element, Node, Root}
 use cardano/address.{Address, Credential, Inline, Script, VerificationKey}
@@ -12,11 +16,14 @@ use cardano/transaction.{
 }
 use compliance
 use constants
+use kyc/verify.{membership_leaf_key, membership_leaf_value}
 use types/global_state.{
   GlobalStateDatum, GlobalStateLocation, GlobalStateReferenced, GlobalStateSpent,
   gs_datum_from_location,
 }
-use types/kyc_proof.{Attestation, AttestationProof, KycProof}
+use types/kyc_proof.{
+  Attestation, AttestationProof, KycProof, Membership, MembershipProof,
+}
 use types/power_users.{PowerUser}
 use types/third_party_transfer_logic_script.{
   ThirdPartyDestinationAction, ThirdPartyTransferLogicScriptWithdrawRedeemer,
@@ -49,12 +56,17 @@ use utils.{must_be_signed_by_credential}
 ///   - `can_force_transfer` power user signs.
 validator third_party_transfer_logic_validator(
   security_asset_name: ByteArray,
-  power_users_linked_list_policy_id: ByteArray,
   global_state_policy_id: ByteArray,
-  registry_policy_id: ByteArray,
   /// The issuance policy this deployment's seizure logic exists to police,
   /// pinned at compile time. See `transfer_logic_script.ak` for why this is not
   /// circular — a registry node's `key` derives from the MINTING logic hash.
+  ///
+  /// This is the ONLY authentication of which policy this script polices —
+  /// like `transfer_logic_script.ak`, this withdraw handler no longer reads a
+  /// CIP-113 registry node at all. The base layer already authenticates
+  /// whichever registry node invoked this withdraw-0; the old "this node
+  /// names me" identity assertion was never load-bearing, since registry
+  /// field 4 is a FREE CIP-113 field a decoy node could name too.
   expected_issuance_policy_id: ByteArray,
   /// The DENYLIST SPEND VALIDATOR's script hash, threaded into
   /// `verify_denylist_absence`. See its doc comment.
@@ -70,8 +82,11 @@ validator third_party_transfer_logic_validator(
   /// signs for. Requiring the node to still live at the list's script address
   /// is what makes revocation stick.
   power_user_list_script_hash: ByteArray,
-  /// The CIP-113 programmable-logic base (PLB) script hash. See
-  /// `transfer_logic_script.ak` for why this is defence in depth.
+  /// The CIP-113 programmable-logic base (PLB) script hash — the shared
+  /// payment credential of every compliant token UTxO. Seizure-path custody
+  /// is NOT among the verified base-layer guarantees (unlike ordinary
+  /// transfer and mint), so this pin is the ONLY control keeping a forced
+  /// transfer's destination inside the programmable base.
   plb_script_hash: ByteArray,
 ) {
   withdraw(
@@ -81,23 +96,7 @@ validator third_party_transfer_logic_validator(
   ) {
     // A withdrawal credential may be a verification key, so this is a real
     // assertion, not a formality.
-    expect Script(own_script_hash) = credential
-    let issuance_policy_id = utils.derive_issuance_policy_id_from_registry_node(
-      utils.safe_list_at(
-        self.reference_inputs,
-        redeemer.registry_node_ref_input_index,
-      ).output,
-      registry_policy_id,
-      own_script_hash,
-      constants.third_party_transfer_logic_script_registry_node_index,
-    )
-    // Registry field 4 (`third_party_transfer_logic_script`) is a FREE
-    // CIP-113 field, exactly like field 3. Without this pin a `can_force_transfer`
-    // operator points at a decoy node and the destination constraint — the
-    // entire content of that role's limits — disappears: the seized-input
-    // requirement is met with dust of the attacker's own decoy token, and the
-    // real security token lands anywhere, sanctioned addresses included.
-    expect issuance_policy_id == expected_issuance_policy_id
+    expect Script(_) = credential
 
     // Resolve and AUTHENTICATE GlobalState, then read every flag from the one
     // parsed datum — the full datum is needed anyway, so the cheap first-field
@@ -111,22 +110,34 @@ validator third_party_transfer_logic_validator(
       global_state_policy_id,
     )
 
-    // Unique destination stake-cred hashes from outputs carrying the token.
-    let outputs_user_credentials = list.unique(
-      list.foldr(
+    // Unique destination stake-cred hashes from outputs carrying the token,
+    // deduplicated during the fold (see `transfer_logic_script.ak` for why
+    // this replaced `list.unique` and why the first-occurrence order is
+    // kept).
+    let outputs_user_credentials = list.reverse(
+      list.foldl(
         self.outputs,
         [],
         fn(output, result) {
-          if quantity_of(output.value, issuance_policy_id, security_asset_name) > 0 {
-            // A seizure destination must also sit inside the
-            // programmable-logic base, for the same reason as the ordinary
-            // transfer path — see `transfer_logic_script.ak`.
+          if quantity_of(
+            output.value,
+            expected_issuance_policy_id,
+            security_asset_name,
+          ) > 0 {
+            // Seizure-path custody is NOT among the verified base-layer
+            // guarantees, so — unlike the ordinary transfer path — this pin
+            // stays: a seizure destination must sit inside the
+            // programmable-logic base.
             expect Script(dest_payment) = output.address.payment_credential
             expect dest_payment == plb_script_hash
             // Carry the full `Credential`; the constructor is part of the
             // holder's identity.
             expect Some(Inline(stake_cred)) = output.address.stake_credential
-            list.push(result, stake_cred)
+            if list.has(result, stake_cred) {
+              result
+            } else {
+              [stake_cred, ..result]
+            }
           } else {
             result
           }
@@ -145,7 +156,7 @@ validator third_party_transfer_logic_validator(
       fn(action) { action.destination_denylist_covering_ref_input_index },
       gs_datum.requires_receiver_kyc,
       gs_datum,
-      issuance_policy_id,
+      expected_issuance_policy_id,
       denylist_script_hash,
       self,
     )
@@ -157,7 +168,7 @@ validator third_party_transfer_logic_validator(
     )
     let (power_user_node_key, power_user_data) = utils.authenticated_power_user(
       power_user_ref_input.output,
-      power_users_linked_list_policy_id,
+      gs_datum.power_user_linked_list_policy_id,
       power_user_list_script_hash,
     )
 
@@ -170,7 +181,11 @@ validator third_party_transfer_logic_validator(
     let at_least_one_seized_input = list.any(
       self.inputs,
       fn(input) {
-        quantity_of(input.output.value, issuance_policy_id, security_asset_name) > 0
+        quantity_of(
+          input.output.value,
+          expected_issuance_policy_id,
+          security_asset_name,
+        ) > 0
       },
     )
 
@@ -473,8 +488,9 @@ fn p_dest_action() -> ThirdPartyDestinationAction {
 
 fn p_redeemer() -> ThirdPartyTransferLogicScriptWithdrawRedeemer {
   ThirdPartyTransferLogicScriptWithdrawRedeemer {
-    registry_node_ref_input_index: 0,
-    global_state_location: GlobalStateReferenced { global_state_ref_input_index: 1 },
+    global_state_location: GlobalStateReferenced {
+      global_state_ref_input_index: 1,
+    },
     power_user_node_ref_input_index: 3,
     destination_actions: [p_dest_action()],
   }
@@ -528,9 +544,7 @@ fn run_third_party(
 ) -> Bool {
   third_party_transfer_logic_validator.withdraw(
     p_sec_name,
-    p_pu_policy,
     p_gs_policy,
-    p_registry_policy,
     p_issuance_policy,
     p_denylist_script_hash,
     p_pu_script_hash,
@@ -548,6 +562,38 @@ test force_transfer_succeeds_when_clean() {
   run_third_party(
     p_redeemer(),
     p_tx(False, False, False, True, [p_seized_input()], [p_pu_cred]),
+  )
+}
+
+// This validator no longer reads a CIP-113 registry node at all — the policy
+// it polices is pinned at compile time. Every fixture above still carries
+// `p_registry_ref_input()` at reference index 0 (unused, kept to minimise
+// their diff); this one omits it entirely to prove the removal is real. GS
+// moves to index 0, the denylist root to index 1, the power-user node to
+// index 2.
+test seizure_succeeds_without_any_registry_reference_input() {
+  let tx = Transaction {
+    ..p_tx(False, False, False, True, [p_seized_input()], [p_pu_cred]),
+    reference_inputs: [
+      p_gs_ref_input(False, False, False),
+      p_denylist_root_ref_input(),
+      p_pu_node_ref_input(True),
+    ],
+  }
+  run_third_party(
+    ThirdPartyTransferLogicScriptWithdrawRedeemer {
+      global_state_location: GlobalStateReferenced {
+        global_state_ref_input_index: 0,
+      },
+      power_user_node_ref_input_index: 2,
+      destination_actions: [
+        ThirdPartyDestinationAction {
+          destination_proof: p_dummy_proof(),
+          destination_denylist_covering_ref_input_index: 1,
+        },
+      ],
+    },
+    tx,
   )
 }
 
@@ -594,9 +640,10 @@ fn p_spent_gs_tx() -> Transaction {
   }
 }
 
-fn p_spent_gs_redeemer(location: GlobalStateLocation) -> ThirdPartyTransferLogicScriptWithdrawRedeemer {
+fn p_spent_gs_redeemer(
+  location: GlobalStateLocation,
+) -> ThirdPartyTransferLogicScriptWithdrawRedeemer {
   ThirdPartyTransferLogicScriptWithdrawRedeemer {
-    registry_node_ref_input_index: 0,
     global_state_location: location,
     power_user_node_ref_input_index: 2,
     destination_actions: [
@@ -625,7 +672,9 @@ test force_transfer_rejected_when_location_names_the_wrong_list() fail {
   // genuinely selects which list is read, rather than both happening to work
   // because the fixture is too forgiving.
   run_third_party(
-    p_spent_gs_redeemer(GlobalStateReferenced { global_state_ref_input_index: 1 }),
+    p_spent_gs_redeemer(
+      GlobalStateReferenced { global_state_ref_input_index: 1 },
+    ),
     p_spent_gs_tx(),
   )
 }
@@ -735,4 +784,306 @@ test force_transfer_rejected_when_not_signed() {
     p_redeemer(),
     p_tx(False, False, False, True, [p_seized_input()], []),
   )
+}
+
+// ============================================================================
+// Power-users list policy cross-check
+// ============================================================================
+// The compile-time `power_users_linked_list_policy_id` parameter and
+// GlobalState's `power_user_linked_list_policy_id` field must agree. Both
+// tests share one fixture — only that one datum field differs — so the
+// pairing pins that the trap is caused specifically by the mismatch.
+
+/// Sibling of `p_gs_ref_input` with a caller-chosen
+/// `power_user_linked_list_policy_id`, for the cross-check tests below.
+fn p_gs_ref_input_with_pu_policy(pu_policy_field: ByteArray) -> Input {
+  let datum = GlobalStateDatum {
+    transfers_paused: False,
+    deactivated: False,
+    mintable_amount: 1_000_000,
+    admin_credential_hash: #"",
+    power_user_linked_list_policy_id: pu_policy_field,
+    denylist_linked_list_policy_id: p_denylist_policy,
+    security_info: builtin.constr_data(0, []),
+    trusted_entity_vkeys: [],
+    member_root_hash: #"",
+    requires_sender_kyc: False,
+    requires_receiver_kyc: False,
+    network_id: 1,
+    minting_script_credential_hash: #"",
+    upgrades_locked: False,
+  }
+  Input {
+    output_reference: p_out_ref(1),
+    output: Output {
+      address: Address {
+        payment_credential: Script(p_gs_policy),
+        stake_credential: None,
+      },
+      value: merge(
+        from_lovelace(2_000_000),
+        from_asset(p_gs_policy, constants.global_state_asset_name, 1),
+      ),
+      datum: InlineDatum(datum),
+      reference_script: None,
+    },
+  }
+}
+
+/// A policy id distinct from `p_pu_policy` (this deployment's real
+/// power-users list), used only to prove the cross-check catches a mismatch.
+const p_wrong_pu_policy: ByteArray =
+  #"bfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbf"
+
+/// NEGATIVE. GlobalState's `power_user_linked_list_policy_id` disagrees with
+/// the deployment's `p_pu_policy` parameter. Traps at
+/// `expect gs_datum.power_user_linked_list_policy_id ==
+/// power_users_linked_list_policy_id`, before any power-user node is read.
+/// Hence `fail`.
+test force_transfer_rejects_a_global_state_with_a_mismatched_power_user_policy() fail {
+  let tx = Transaction {
+    ..p_tx(False, False, False, True, [p_seized_input()], [p_pu_cred]),
+    reference_inputs: [
+      p_registry_ref_input(),
+      p_gs_ref_input_with_pu_policy(p_wrong_pu_policy),
+      p_denylist_root_ref_input(),
+      p_pu_node_ref_input(True),
+    ],
+  }
+  run_third_party(p_redeemer(), tx)
+}
+
+/// POSITIVE CONTROL. The identical fixture with GlobalState's
+/// `power_user_linked_list_policy_id` set back to the deployment's own
+/// `p_pu_policy` succeeds — pins that the trap above is caused specifically
+/// by the mismatch, not by anything else in the shared fixture.
+test force_transfer_succeeds_when_global_state_power_user_policy_matches() {
+  let tx = Transaction {
+    ..p_tx(False, False, False, True, [p_seized_input()], [p_pu_cred]),
+    reference_inputs: [
+      p_registry_ref_input(),
+      p_gs_ref_input_with_pu_policy(p_pu_policy),
+      p_denylist_root_ref_input(),
+      p_pu_node_ref_input(True),
+    ],
+  }
+  run_third_party(p_redeemer(), tx)
+}
+
+// ============================================================================
+// Membership KYC end-to-end
+// ============================================================================
+// The destination-side twin of `transfer_logic_script.ak`'s membership tests
+// — this path has no source-side checks at all, so the receiver side is the
+// only one there is. Same construction as
+// `lib/kyc/verify.ak`'s `membership_succeeds_with_a_genuine_single_leaf_root`:
+// a genuine single-leaf MPF root built with the vendored library itself.
+
+/// Sibling of `p_gs_ref_input` carrying a membership root instead of an empty
+/// one, with the given `requires_receiver_kyc` flag.
+fn p_gs_ref_input_with_member_root(
+  req_receiver: Bool,
+  member_root_hash: ByteArray,
+) -> Input {
+  let datum = GlobalStateDatum {
+    transfers_paused: False,
+    deactivated: False,
+    mintable_amount: 1_000_000,
+    admin_credential_hash: #"",
+    power_user_linked_list_policy_id: p_pu_policy,
+    denylist_linked_list_policy_id: p_denylist_policy,
+    security_info: builtin.constr_data(0, []),
+    trusted_entity_vkeys: [],
+    member_root_hash,
+    requires_sender_kyc: False,
+    requires_receiver_kyc: req_receiver,
+    network_id: 1,
+    minting_script_credential_hash: #"",
+    upgrades_locked: False,
+  }
+  Input {
+    output_reference: p_out_ref(1),
+    output: Output {
+      address: Address {
+        payment_credential: Script(p_gs_policy),
+        stake_credential: None,
+      },
+      value: merge(
+        from_lovelace(2_000_000),
+        from_asset(p_gs_policy, constants.global_state_asset_name, 1),
+      ),
+      datum: InlineDatum(datum),
+      reference_script: None,
+    },
+  }
+}
+
+/// Sibling of `p_tx` with a Finite validity upper bound — a membership proof
+/// needs one (`verify_membership_proof` requires the tx's validity upper
+/// bound to be Finite and <= the proof's `valid_until_ms`), which `p_tx`'s
+/// own PositiveInfinity bound can never satisfy.
+fn p_tx_with_member_root(
+  req_receiver: Bool,
+  member_root_hash: ByteArray,
+  can_force_transfer: Bool,
+  inputs: List<Input>,
+  signatories: List<ByteArray>,
+) -> Transaction {
+  Transaction {
+    inputs,
+    reference_inputs: [
+      p_registry_ref_input(),
+      p_gs_ref_input_with_member_root(req_receiver, member_root_hash),
+      p_denylist_root_ref_input(),
+      p_pu_node_ref_input(can_force_transfer),
+    ],
+    outputs: [p_token_utxo(p_dest_stake, 1_000)],
+    fee: 0,
+    mint: assets.zero,
+    certificates: [],
+    withdrawals: [],
+    validity_range: Interval {
+      lower_bound: IntervalBound {
+        bound_type: NegativeInfinity,
+        is_inclusive: True,
+      },
+      upper_bound: IntervalBound {
+        bound_type: Finite(p_kyc_tx_upper),
+        is_inclusive: True,
+      },
+    },
+    extra_signatories: signatories,
+    redeemers: [],
+    datums: dict.empty,
+    id: #"0000000000000000000000000000000000000000000000000000000000000000",
+    votes: [],
+    proposal_procedures: [],
+    current_treasury_amount: None,
+    treasury_donation: None,
+  }
+}
+
+/// POSIX millisecond TTL used by the membership fixtures below.
+const p_kyc_tx_upper: Int = 50_000_000
+
+const p_membership_valid_until_ms: Int = 100_000_000
+
+/// A genuine single-leaf MPF root committing to `credential`'s membership.
+fn p_membership_root_for(
+  credential: Credential,
+  valid_until_ms: Int,
+) -> ByteArray {
+  mpf.empty
+    |> mpf.insert(
+        membership_leaf_key(credential),
+        membership_leaf_value(valid_until_ms, p_issuance_policy, 1),
+        [],
+      )
+    |> mpf.root()
+}
+
+fn p_membership_proof(pkh: ByteArray, valid_until_ms: Int) -> KycProof {
+  Membership {
+    membership_proof: MembershipProof { pkh, valid_until_ms, mpf_proof: [] },
+  }
+}
+
+/// POSITIVE. A genuine single-leaf root for `p_dest_stake` as a
+/// VerificationKey credential (matches how `p_token_utxo` constructs the
+/// stake credential), set as GlobalState's `member_root_hash` with
+/// `requires_receiver_kyc = True`, driven through a `Membership` proof with
+/// an empty inclusion proof. Must succeed.
+test force_transfer_succeeds_when_destination_membership_proof_is_genuine() {
+  let root = p_membership_root_for(
+    VerificationKey(p_dest_stake),
+    p_membership_valid_until_ms,
+  )
+  let dest_action = ThirdPartyDestinationAction {
+    destination_proof: p_membership_proof(
+      p_dest_stake,
+      p_membership_valid_until_ms,
+    ),
+    destination_denylist_covering_ref_input_index: 2,
+  }
+  run_third_party(
+    ThirdPartyTransferLogicScriptWithdrawRedeemer {
+      ..p_redeemer(),
+      destination_actions: [dest_action],
+    },
+    p_tx_with_member_root(True, root, True, [p_seized_input()], [p_pu_cred]),
+  )
+}
+
+/// NEGATIVE TWIN. Identical transaction and proof, but the on-chain root
+/// commits to a DIFFERENT credential (`p_source_stake`, not the destination's
+/// `p_dest_stake`). The destination's leaf is not in this tree, so `mpf.has`
+/// returns False and the seizure is rejected. Rejection is a clean `False`,
+/// not a trap, hence `!` rather than `fail`.
+test force_transfer_rejected_when_destination_membership_root_is_for_another_credential() {
+  let root = p_membership_root_for(
+    VerificationKey(p_source_stake),
+    p_membership_valid_until_ms,
+  )
+  let dest_action = ThirdPartyDestinationAction {
+    destination_proof: p_membership_proof(
+      p_dest_stake,
+      p_membership_valid_until_ms,
+    ),
+    destination_denylist_covering_ref_input_index: 2,
+  }
+  !run_third_party(
+    ThirdPartyTransferLogicScriptWithdrawRedeemer {
+      ..p_redeemer(),
+      destination_actions: [dest_action],
+    },
+    p_tx_with_member_root(True, root, True, [p_seized_input()], [p_pu_cred]),
+  )
+}
+
+// ============================================================================
+// Benchmarks — cost scaling vs. destination count
+// ============================================================================
+// `aiken bench -m "third_party_transfer_logic_script"` runs this. Mirrors
+// `transfer_cost_by_party_count` in `transfer_logic_script.ak`: ONE seized
+// input (this path has no source-side checks at all — see the validator's
+// doc comment) fanning out to `n` distinct destinations, denylist-only
+// (`requires_receiver_kyc = False`), every destination action citing
+// reference input 2 — the root-only denylist covering node, covers every
+// key. Sampler is `fuzz.constant(size)`: `n` is exactly the growth step,
+// no randomness, so cost stays a pure function of `n`.
+//
+// `n = 1` reproduces `force_transfer_succeeds_when_clean`'s shape (one seized
+// input, one destination, GS referenced, no KYC) as a sanity anchor.
+
+/// Deterministic i-th 28-byte stake-credential hash for bench destinations —
+/// same construction as `transfer_logic_script.ak`'s `t_bench_hash`, kept
+/// local since bench fixtures are not shared across modules here.
+fn p_bench_hash(i: Int, tail: ByteArray) -> ByteArray {
+  bytearray.concat(bytearray.from_int_big_endian(i, 4), tail)
+}
+
+const p_bench_dest_tail: ByteArray =
+  #"2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b"
+
+fn p_bench_dest_output(i: Int) -> Output {
+  p_token_utxo(p_bench_hash(i, p_bench_dest_tail), 1_000)
+}
+
+/// Sampler: the bench size IS the destination count `n`, via `fuzz.constant`
+/// — see the section note above for why this must not be randomised.
+fn n_destinations(size: Int) -> Fuzzer<Int> {
+  fuzz.constant(size)
+}
+
+bench seizure_cost_by_destination_count(n via n_destinations) {
+  let redeemer = ThirdPartyTransferLogicScriptWithdrawRedeemer {
+    ..p_redeemer(),
+    destination_actions: list.repeat(p_dest_action(), n),
+  }
+  let tx = Transaction {
+    ..p_tx(False, False, False, True, [p_seized_input()], [p_pu_cred]),
+    outputs: list.map(list.range(0, n - 1), p_bench_dest_output),
+  }
+  // Assert rather than `fail`-annotate — see `transfer_cost_by_party_count`.
+  expect run_third_party(redeemer, tx)
 }

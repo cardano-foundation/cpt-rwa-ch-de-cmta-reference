@@ -413,13 +413,12 @@ pub fn gs_datum_from_location(
   location: GlobalStateLocation,
   global_state_policy_id: ByteArray,
 ) -> GlobalStateDatum {
-  let gs_output =
-    when location is {
-      GlobalStateSpent { global_state_input_index } ->
-        utils.safe_list_at(inputs, global_state_input_index).output
-      GlobalStateReferenced { global_state_ref_input_index } ->
-        utils.safe_list_at(reference_inputs, global_state_ref_input_index).output
-    }
+  let gs_output = when location is {
+    GlobalStateSpent { global_state_input_index } ->
+      utils.safe_list_at(inputs, global_state_input_index).output
+    GlobalStateReferenced { global_state_ref_input_index } ->
+      utils.safe_list_at(reference_inputs, global_state_ref_input_index).output
+  }
   gs_datum_from_output(gs_output, global_state_policy_id)
 }
 
@@ -536,6 +535,22 @@ pub type GlobalStateSpendAction {
   /// grants no power that did not already exist. What it does mean is that
   /// "locked at slot N" does not imply "no upgrade at slot N", only "none after
   /// it" — worth knowing when auditing the chain.
+  ///
+  /// THE SAME SHAPE RECURS BEYOND LockUpgrades, for the identical structural
+  /// reason: any admin-only action paired, in the SAME transaction, with a
+  /// registry-node upgrade or other structural registration that reads
+  /// GlobalState as a spent input sees the pre-state datum. `RotateAdmin` plus
+  /// an upgrade signed by the OUTGOING admin in that same transaction still
+  /// succeeds, because the upgrade's read of `admin_credential_hash` happens
+  /// against the value before this spend's write takes effect.
+  /// `DeactivateContract` plus a final upgrade in the same transaction is the
+  /// same LockUpgrades-shaped case again. All of these are admin-only and are
+  /// recorded on-chain as accepted at the exact moment they happen — nothing
+  /// is hidden, only foreclosed one transaction later than a naive reading of
+  /// "already locked/rotated/deactivated" would suggest. What none of this
+  /// reopens is token movement: that path is closed independently, by
+  /// `no_security_token_movement` in the spend validator, which every
+  /// non-MintSecurity branch composes regardless of which field it touches.
   LockUpgrades
   /// One-way decommissioning switch. Sets `deactivated = True`. Requires the
   /// contract to already be paused and the admin to sign. Irreversible: no

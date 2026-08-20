@@ -51,14 +51,14 @@ use denylist/absence.{verify_denylist_absence}
 use global_state as v_global_state
 use minting_authority as v_minting_authority
 use power_users as v_power_users
-use third_party_transfer_logic_script as v_third_party
 use transfer_logic_script as v_transfer
 use types/denylist.{
   AddToDenylist, Deinit as DenylistDeinit, Denylist, Init as DenylistInit,
   RemoveFromDenylist, StateTransition as DenylistStateTransition,
 }
 use types/global_state.{
-  GlobalStateDatum, GlobalStateReferenced, GlobalStateSpendRedeemer, LockUpgrades,
+  GlobalStateDatum, GlobalStateReferenced, GlobalStateSpendRedeemer,
+  LockUpgrades,
 }
 use types/kyc_proof.{Attestation, AttestationProof, KycProof}
 use types/minting_authority.{
@@ -66,9 +66,6 @@ use types/minting_authority.{
 }
 use types/power_users.{
   AddPowerUser, PowerUser, RemovePowerUser, StateTransition as PuStateTransition,
-}
-use types/third_party_transfer_logic_script.{
-  ThirdPartyTransferLogicScriptWithdrawRedeemer,
 }
 use types/transfer_logic_script.{
   TransferLogicScriptAction, TransferLogicScriptDestinationAction,
@@ -88,11 +85,6 @@ const gs_policy: ByteArray =
 /// deployment's CIP-113 registry node.
 const issuance_policy: ByteArray =
   #"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
-
-/// The attacker's OWN programmable token. Registering it is permissionless in
-/// CIP-113 and costs one registry insert.
-const decoy_policy: ByteArray =
-  #"99999999999999999999999999999999999999999999999999999999"
 
 const registry_policy: ByteArray =
   #"cccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
@@ -152,9 +144,6 @@ const attacker_wallet: ByteArray =
 
 const clean_stake: ByteArray =
   #"0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b"
-
-const victim_stake: ByteArray =
-  #"0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f"
 
 // ── Denylist keys, chosen to exercise the prefix-strip mismatch ──────────────
 //
@@ -222,32 +211,6 @@ fn genuine_node() -> RegNode {
     unfracking_logic_script: VerificationKey(#""),
     global_state_cs: gs_policy,
   }
-}
-
-/// The attacker's own programmable token, registered permissionlessly, whose
-/// free-form fields 3 and 4 NAME THIS DEPLOYMENT'S transfer-logic and
-/// third-party scripts. CIP-113 binds `key` to `minting_logic_script` only, so
-/// nothing stops this.
-fn decoy_node() -> RegNode {
-  RegNode {
-    key: decoy_policy,
-    next: #"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
-    minting_logic_script: Script(
-      #"aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11",
-    ),
-    transfer_logic_script: Script(transfer_hash),
-    third_party_transfer_logic_script: Script(third_party_hash),
-    unfracking_logic_script: VerificationKey(#""),
-    global_state_cs: #"dd44dd44dd44dd44dd44dd44dd44dd44dd44dd44dd44dd44dd44dd44",
-  }
-}
-
-/// A decoy node naming this deployment's MINTING PROXY at field 2. CIP-113's
-/// `registry_mint` is supposed to make this unconstructible (the key is derived
-/// from the minting-logic hash, and node keys are unique). This repo re-verifies
-/// field 2 but never re-derives the key, so the guarantee is entirely external.
-fn decoy_node_naming_proxy() -> RegNode {
-  RegNode { ..decoy_node(), minting_logic_script: Script(proxy_hash) }
 }
 
 fn registry_node_input(ix: Int, node: RegNode) -> Input {
@@ -715,31 +678,10 @@ fn run_transfer(
   v_transfer.transfer_logic_validator.withdraw(
     sec_name,
     gs_policy,
-    registry_policy,
     issuance_policy,
     denylist_script_hash,
-    plb_hash,
     redeemer,
     Script(transfer_hash),
-    tx,
-  )
-}
-
-fn run_third_party(
-  redeemer: ThirdPartyTransferLogicScriptWithdrawRedeemer,
-  tx: Transaction,
-) -> Bool {
-  v_third_party.third_party_transfer_logic_validator.withdraw(
-    sec_name,
-    pu_policy,
-    gs_policy,
-    registry_policy,
-    issuance_policy,
-    denylist_script_hash,
-    pu_script_hash,
-    plb_hash,
-    redeemer,
-    Script(third_party_hash),
     tx,
   )
 }
@@ -755,7 +697,6 @@ fn run_authority(
     pu_policy,
     proxy_hash,
     issuance_policy,
-    plb_hash,
     denylist_script_hash,
     pu_script_hash,
     reference_name,
@@ -787,50 +728,17 @@ fn run_gs_spend(
 // denylist-absence proof and, when required, a valid KYC proof.
 // ============================================================================
 
-/// THE DEFECT. `transfer_logic_validator` learns WHICH token it is policing from a
-/// registry node named by an attacker-chosen redeemer index, and authenticates
-/// that node only by "it names me at field 3". CIP-113 leaves field 3 a FREE
-/// field — `minting_authority.ak:370-374` says so — so the attacker registers a
-/// throwaway programmable token whose field 3 points at this validator, then
-/// aims the redeemer at it. The scan for `decoy_policy + "SEC"` matches nothing,
-/// so both the sender and destination lists come out empty and every per-party
-/// check is skipped.
-///
-/// Here a SANCTIONED holder moves the real token with sender AND receiver KYC
-/// both switched on and their own denylist entry sitting unread in the reference
-/// inputs.
-///
-/// THE GUARD. `transfer_logic_validator` takes
-/// `expected_issuance_policy_id` as a compile-time parameter and asserts the
-/// derived id against it, so the decoy node TRAPS before any scan happens.
-/// Hence `fail`.
-test transfer_rejects_a_foreign_registry_node() fail {
-  let tx = Transaction {
-    ..base_tx(),
-    inputs: [token_input(10, issuance_policy, dl_sanctioned_key, 1_000)],
-    reference_inputs: [
-      registry_node_input(0, decoy_node()),
-      gs_utxo(1, 2_000_000, gs_datum(False, False, True, True)),
-      dl_node_input(2, dl_sanctioned_key, None),
-    ],
-    outputs: [token_utxo(issuance_policy, dl_sanctioned_key, 1_000)],
-  }
-  run_transfer(
-    TransferLogicScriptWithdrawRedeemer {
-      registry_node_ref_input_index: 0,
-      global_state_location: GlobalStateReferenced { global_state_ref_input_index: 1 },
-      actions_for_each_input: [],
-      destination_actions: [],
-    },
-    tx,
-  )
-}
+// The decoy-registry-node bypass test formerly here is gone: this property
+// is now delegated to the base layer. `transfer_logic_validator` no longer
+// reads a registry node at all — the policy it polices is pinned at compile
+// time — so a decoy node naming this script (registry field 3 is a FREE
+// CIP-113 field) has nothing to bypass any more.
 
-/// THE CONTROL. Identical transaction, but the redeemer points at THIS
-/// token's genuine registry node. Now the scan finds the token, the sanctioned
-/// party's own node is the covering candidate, and `covers_key`
-/// (lib/denylist/absence.ak:23) rejects a node whose key equals the target. This
-/// is the defence the foreign-node bypass walked around, not through.
+/// A SANCTIONED holder attempts to move the real token with sender AND
+/// receiver KYC both switched on and their own denylist entry sitting in the
+/// reference inputs. The sanctioned party's own node is the covering
+/// candidate, and `covers_key` (lib/denylist/absence.ak:23) rejects a node
+/// whose key equals the target.
 test transfer_rejects_a_sanctioned_sender_via_the_genuine_node() {
   let tx = Transaction {
     ..base_tx(),
@@ -844,8 +752,9 @@ test transfer_rejects_a_sanctioned_sender_via_the_genuine_node() {
   }
   !run_transfer(
     TransferLogicScriptWithdrawRedeemer {
-      registry_node_ref_input_index: 0,
-      global_state_location: GlobalStateReferenced { global_state_ref_input_index: 1 },
+      global_state_location: GlobalStateReferenced {
+        global_state_ref_input_index: 1,
+      },
       actions_for_each_input: [src_action(2)],
       destination_actions: [dst_action(2)],
     },
@@ -943,8 +852,9 @@ test transfer_rejects_a_sanctioned_holder_end_to_end() {
   }
   !run_transfer(
     TransferLogicScriptWithdrawRedeemer {
-      registry_node_ref_input_index: 0,
-      global_state_location: GlobalStateReferenced { global_state_ref_input_index: 1 },
+      global_state_location: GlobalStateReferenced {
+        global_state_ref_input_index: 1,
+      },
       actions_for_each_input: [src_action(2)],
       destination_actions: [dst_action(2)],
     },
@@ -978,8 +888,9 @@ test transfer_accepts_a_clean_holder_with_a_high_successor_link() {
   }
   run_transfer(
     TransferLogicScriptWithdrawRedeemer {
-      registry_node_ref_input_index: 0,
-      global_state_location: GlobalStateReferenced { global_state_ref_input_index: 1 },
+      global_state_location: GlobalStateReferenced {
+        global_state_ref_input_index: 1,
+      },
       actions_for_each_input: [src_action(2)],
       destination_actions: [dst_action(2)],
     },
@@ -1523,7 +1434,6 @@ test mint_succeeds_while_transfers_are_paused_by_design() {
   }
   run_authority(
     MintBurn {
-      registry_node_ref_input_index: 1,
       global_state_input_index: 0,
       power_user_node_ref_input_index: 0,
       minted_amount: 1_000,
@@ -1552,7 +1462,6 @@ test burn_succeeds_while_transfers_are_paused_by_design() {
   }
   run_authority(
     MintBurn {
-      registry_node_ref_input_index: 1,
       global_state_input_index: 0,
       power_user_node_ref_input_index: 0,
       minted_amount: -1_000,
@@ -1567,88 +1476,12 @@ test burn_succeeds_while_transfers_are_paused_by_design() {
 // where transfer logic can reach it.
 // ============================================================================
 
-/// THE DEFECT, at this layer. `verify_mint_destinations`
-/// (validators/minting_authority.ak:609) vets the destination's inline STAKE
-/// credential and never looks at its PAYMENT credential — the comment asserts
-/// that the PLB script "is" the payment credential rather than checking it.
-/// Minting straight to a plain wallet puts supply outside the programmable base,
-/// where no transfer-logic script is ever invoked and the tokens are
-/// unregulated forever. Whether the base layer's own `issuance_mint`
-/// independently pins the destination is a BASE-LAYER ASSUMPTION; nothing here did.
-///
-/// THE GUARD. `minting_authority_validator` takes the PLB
-/// script hash as a compile-time parameter and `verify_mint_destinations`
-/// asserts every token-bearing output sits behind it. The wallet destination
-/// fails the `expect Script(...) == plb_script_hash` pattern, so this TRAPS —
-/// hence `fail`.
-test mint_rejects_a_destination_outside_the_programmable_logic_base() fail {
-  let tx = Transaction {
-    ..base_tx(),
-    inputs: [gs_utxo(0, 2_000_000, gs_datum(False, False, False, False))],
-    reference_inputs: [
-      pu_node_input(0, power_user(False, True, False, False, False)),
-      registry_node_input(1, genuine_node()),
-      dl_root_input(2),
-    ],
-    outputs: [
-      token_utxo_at(
-        VerificationKey(attacker_wallet),
-        issuance_policy,
-        clean_stake,
-        1_000,
-      ),
-    ],
-    mint: from_asset(issuance_policy, sec_name, 1_000),
-    extra_signatories: [pu_cred],
-  }
-  run_authority(
-    MintBurn {
-      registry_node_ref_input_index: 1,
-      global_state_input_index: 0,
-      power_user_node_ref_input_index: 0,
-      minted_amount: 1_000,
-      destination_actions: [mint_dst_action(2)],
-    },
-    tx,
-  )
-}
-
-/// extended to the TRANSFER path. Same escape, different route: a transfer
-/// whose destination sits outside the programmable-logic base. Unlike the mint
-/// case above,
-/// this was never independently exploitable — PLGlobal's `validate_transfer`
-/// requires PLB outputs ⊇ PLB inputs per policy, which with ledger
-/// value-conservation already forbids it (verified against the deployed base
-/// layer, assumption the base layer). The pin is defence in depth; this test is its
-/// regression guard, so a future edit cannot silently drop it.
-test transfer_rejects_a_destination_outside_the_programmable_logic_base() fail {
-  let tx = Transaction {
-    ..base_tx(),
-    inputs: [token_input(10, issuance_policy, clean_stake, 1_000)],
-    reference_inputs: [
-      registry_node_input(0, genuine_node()),
-      gs_utxo(1, 2_000_000, gs_datum(False, False, False, False)),
-      dl_node_input(2, dl_pred_key, None),
-    ],
-    outputs: [
-      token_utxo_at(
-        VerificationKey(attacker_wallet),
-        issuance_policy,
-        clean_stake,
-        1_000,
-      ),
-    ],
-  }
-  run_transfer(
-    TransferLogicScriptWithdrawRedeemer {
-      registry_node_ref_input_index: 0,
-      global_state_location: GlobalStateReferenced { global_state_ref_input_index: 1 },
-      actions_for_each_input: [src_action(2)],
-      destination_actions: [dst_action(2)],
-    },
-    tx,
-  )
-}
+// The mint- and transfer-path "destination outside the programmable base"
+// tests formerly here are gone: that property is now delegated to the base
+// layer. `issuance_mint`'s `no_escape` (mint) and transfer conservation
+// (`tokens.contains(PLB outputs, PLB inputs)` per policy, transfer) were
+// verified 2026-08-19 to already forbid this independently of the payment-
+// credential pins this repo used to assert on top of them.
 
 // ── The two credential forms of one hash are two parties ────────────────────
 //
@@ -1658,8 +1491,8 @@ test transfer_rejects_a_destination_outside_the_programmable_logic_base() fail {
 // (`programmable_logic/owner.ak`: signature vs withdraw-0), so they are not one
 // party. Deduplication now runs over the full `Credential`.
 //
-// Two dedup implementations exist and both are covered here: `list.unique` in
-// the transfer path, and the hand-rolled recursion in
+// Two dedup implementations exist and both are covered here: the in-fold
+// `list.has` dedupe in the transfer path, and the hand-rolled recursion in
 // `minting_authority.verify_mint_destinations`.
 
 /// POSITIVE. One holder hash behind BOTH credential forms, each supplying its
@@ -1683,8 +1516,9 @@ test transfer_treats_key_and_script_forms_of_one_hash_as_two_parties() {
   }
   run_transfer(
     TransferLogicScriptWithdrawRedeemer {
-      registry_node_ref_input_index: 0,
-      global_state_location: GlobalStateReferenced { global_state_ref_input_index: 1 },
+      global_state_location: GlobalStateReferenced {
+        global_state_ref_input_index: 1,
+      },
       actions_for_each_input: [src_action(2), src_action(2)],
       destination_actions: [dst_action(2), dst_action(2)],
     },
@@ -1715,8 +1549,9 @@ test transfer_rejects_one_action_covering_both_credential_forms() fail {
   }
   run_transfer(
     TransferLogicScriptWithdrawRedeemer {
-      registry_node_ref_input_index: 0,
-      global_state_location: GlobalStateReferenced { global_state_ref_input_index: 1 },
+      global_state_location: GlobalStateReferenced {
+        global_state_ref_input_index: 1,
+      },
       actions_for_each_input: [src_action(2)],
       destination_actions: [dst_action(2), dst_action(2)],
     },
@@ -1729,52 +1564,15 @@ test transfer_rejects_one_action_covering_both_credential_forms() fail {
 // destination is vetted.
 // ============================================================================
 
-/// THE DEFECT, at this layer — the mirror image of the transfer-path bypass,
-/// on the mint path. Pointing
-/// `registry_node_ref_input_index` at a node whose field 2 names this
-/// deployment's proxy but whose `key` is a foreign policy makes the derived
-/// `issuance_policy_id` foreign: `only_security_asset_minted` inspects the wrong
-/// policy, `minted_amount` reads 0, so the branch demands only `can_burn` and
-/// skips every destination check — while the transaction mints a million of the
-/// REAL token to a SANCTIONED address.
-///
-/// In production this is blocked only by CIP-113's
-/// `is_programmable_token_id_valid` binding `key` to `minting_logic_script`,
-/// plus the registry's unique-key rule. That is a BASE-LAYER ASSUMPTION — external code
-/// this repo neither vendored nor pinned.
-///
-/// THE GUARD. `expected_issuance_policy_id` is a compile-time
-/// parameter asserted at all four derivation sites, so the control no longer
-/// depends on unvendored base-layer behaviour. The decoy node's key is foreign,
-/// so this TRAPS — hence `fail`. (the base layer is still worth verifying: it is what
-/// keeps the base layer's own accounting honest.)
-test mint_rejects_a_registry_node_keyed_to_a_foreign_policy() fail {
-  let tx = Transaction {
-    ..base_tx(),
-    inputs: [gs_utxo(0, 2_000_000, gs_datum(False, False, True, True))],
-    reference_inputs: [
-      pu_node_input(0, power_user(False, False, True, False, False)),
-      registry_node_input(1, decoy_node_naming_proxy()),
-      dl_root_input(2),
-    ],
-    outputs: [token_utxo(issuance_policy, dl_sanctioned_key, 1_000_000)],
-    mint: from_asset(issuance_policy, sec_name, 1_000_000),
-    extra_signatories: [pu_cred],
-  }
-  run_authority(
-    MintBurn {
-      registry_node_ref_input_index: 1,
-      global_state_input_index: 0,
-      power_user_node_ref_input_index: 0,
-      minted_amount: 0,
-      destination_actions: [],
-    },
-    tx,
-  )
-}
+// The mint-path "registry node keyed to a foreign policy" test formerly here
+// is gone: `MintBurn` no longer reads a registry node at all, so a decoy
+// node has nothing left to name. The policy this branch mints/burns is
+// pinned at compile time (`expected_issuance_policy_id`), and the base layer
+// already authenticates whichever registry node invoked this withdraw-0.
 
 /// on the MINT path, which uses a DIFFERENT dedup implementation — the
-/// hand-rolled recursion in `verify_mint_destinations`, not `list.unique`. Two
+/// hand-rolled recursion in `verify_mint_destinations`, not the transfer
+/// path's in-fold `list.has` dedupe. Two
 /// destinations sharing a hash behind different credential forms need two
 /// actions. POSITIVE control.
 test mint_treats_key_and_script_forms_of_one_hash_as_two_destinations() {
@@ -1795,7 +1593,6 @@ test mint_treats_key_and_script_forms_of_one_hash_as_two_destinations() {
   }
   run_authority(
     MintBurn {
-      registry_node_ref_input_index: 1,
       global_state_input_index: 0,
       power_user_node_ref_input_index: 0,
       minted_amount: 1_000,
@@ -1827,7 +1624,6 @@ test mint_rejects_one_action_covering_both_credential_forms() fail {
   }
   run_authority(
     MintBurn {
-      registry_node_ref_input_index: 1,
       global_state_input_index: 0,
       power_user_node_ref_input_index: 0,
       minted_amount: 1_000,
@@ -1841,43 +1637,11 @@ test mint_rejects_one_action_covering_both_credential_forms() fail {
 // PROPERTY: a forced transfer may only land on a vetted destination.
 // ============================================================================
 
-/// THE DEFECT. `third_party_transfer_logic_validator` derives the policy it polices
-/// from registry field 4 — also a free CIP-113 field. With a decoy node the
-/// destination list is empty, so a `can_force_transfer` operator seizes a
-/// victim's holding and parks it on a SANCTIONED address with receiver KYC
-/// switched on. `at_least_one_seized_input` is satisfied by a dust input of the
-/// attacker's own decoy token, which their own minting logic lets them burn.
-///
-/// FIXED (field 4) — now REFUTED. The seizure script pins its issuance
-/// policy at compile time too, so the decoy node TRAPS — hence `fail`. The
-/// destination constraint, which is the entire content of the
-/// `can_force_transfer` role's limits, is back.
-test seizure_rejects_a_foreign_registry_node() fail {
-  let tx = Transaction {
-    ..base_tx(),
-    inputs: [
-      token_input(10, issuance_policy, victim_stake, 5_000),
-      token_input(11, decoy_policy, attacker_wallet, 1),
-    ],
-    reference_inputs: [
-      registry_node_input(0, decoy_node()),
-      gs_utxo(1, 2_000_000, gs_datum(False, False, True, True)),
-      dl_node_input(2, dl_sanctioned_key, None),
-      pu_node_input(3, power_user(False, False, False, False, True)),
-    ],
-    outputs: [token_utxo(issuance_policy, dl_sanctioned_key, 5_000)],
-    extra_signatories: [pu_cred],
-  }
-  run_third_party(
-    ThirdPartyTransferLogicScriptWithdrawRedeemer {
-      registry_node_ref_input_index: 0,
-      global_state_location: GlobalStateReferenced { global_state_ref_input_index: 1 },
-      power_user_node_ref_input_index: 3,
-      destination_actions: [],
-    },
-    tx,
-  )
-}
+// The decoy-registry-node seizure test formerly here is gone: that property
+// is now delegated to the base layer. `third_party_transfer_logic_validator`
+// no longer reads a registry node at all — the policy it polices is pinned
+// at compile time — so a decoy node naming this script (registry field 4 is
+// a FREE CIP-113 field) has nothing to bypass any more.
 
 // ============================================================================
 // PROPERTY: the GlobalState UTxO's value is preserved across every spend —
@@ -1922,13 +1686,12 @@ test global_state_spend_rejects_a_lovelace_withdrawal() {
 /// A GlobalState-shaped datum with no GlobalState NFT traps in
 /// `global_state.is_paused` (lib/types/global_state.ak:345). The NFT is what
 /// makes GlobalState authentic, and that check is genuinely load-bearing:
-/// without it the decoy-node trick would extend to forging `transfers_paused`
-/// and the denylist policy id itself.
+/// without it a forged GlobalState could forge `transfers_paused` and the
+/// denylist policy id itself.
 ///
-/// Uses the GENUINE registry node. It used to use `decoy_node()`, which since
-/// would trap on the `expected_issuance_policy_id` pin instead — the test
-/// would still be `fail`, but for the wrong reason, and would no longer
-/// exercise the GlobalState NFT check at all.
+/// Uses the GENUINE registry node (unused by the validator, kept in this
+/// fixture) so the transaction exercises the GlobalState NFT check itself,
+/// not some other trap.
 test transfer_rejects_a_global_state_without_its_nft() fail {
   let tx = Transaction {
     ..base_tx(),
@@ -1941,8 +1704,9 @@ test transfer_rejects_a_global_state_without_its_nft() fail {
   }
   run_transfer(
     TransferLogicScriptWithdrawRedeemer {
-      registry_node_ref_input_index: 0,
-      global_state_location: GlobalStateReferenced { global_state_ref_input_index: 1 },
+      global_state_location: GlobalStateReferenced {
+        global_state_ref_input_index: 1,
+      },
       actions_for_each_input: [],
       destination_actions: [],
     },
@@ -1950,17 +1714,10 @@ test transfer_rejects_a_global_state_without_its_nft() fail {
   )
 }
 
-/// The pause gate reads the REAL GlobalState — pinned by a
-/// compile-time policy id, which is why a forged GlobalState cannot
-/// reach it. A transfer that is otherwise entirely valid (genuine registry
-/// node, genuine covering node, no KYC required) is still rejected while
+/// The pause gate reads the REAL GlobalState — its NFT is what makes it
+/// authentic — so a transfer that is otherwise entirely valid (genuine
+/// covering node, no KYC required) is still rejected while
 /// `transfers_paused` is set.
-///
-/// Rewritten since : it used to ride on `decoy_node()`, whose empty party
-/// lists made the redeemer's empty action lists harmless. With the issuance
-/// policy pinned, a decoy node now traps before the pause is ever read, so the
-/// test would `fail` on a trap instead of returning False. The genuine node
-/// finds the token, so real actions must be supplied.
 test pause_blocks_an_otherwise_valid_transfer() {
   let tx = Transaction {
     ..base_tx(),
@@ -1974,8 +1731,9 @@ test pause_blocks_an_otherwise_valid_transfer() {
   }
   !run_transfer(
     TransferLogicScriptWithdrawRedeemer {
-      registry_node_ref_input_index: 0,
-      global_state_location: GlobalStateReferenced { global_state_ref_input_index: 1 },
+      global_state_location: GlobalStateReferenced {
+        global_state_ref_input_index: 1,
+      },
       actions_for_each_input: [src_action(2)],
       destination_actions: [dst_action(2)],
     },
@@ -1999,8 +1757,9 @@ test the_same_transfer_succeeds_once_unpaused() {
   }
   run_transfer(
     TransferLogicScriptWithdrawRedeemer {
-      registry_node_ref_input_index: 0,
-      global_state_location: GlobalStateReferenced { global_state_ref_input_index: 1 },
+      global_state_location: GlobalStateReferenced {
+        global_state_ref_input_index: 1,
+      },
       actions_for_each_input: [src_action(2)],
       destination_actions: [dst_action(2)],
     },
@@ -2008,37 +1767,139 @@ test the_same_transfer_succeeds_once_unpaused() {
   )
 }
 
-/// The redeemer cannot name a registry node that does not name THIS
-/// script: `derive_issuance_policy_id_from_registry_node` traps on
-/// `reg_hashed_params == hashed_params` (lib/utils.ak:196). That is the single
-/// binding the decoy-node bypass had to satisfy — and satisfying it cost only a
-/// permissionless
-/// CIP-113 registration, because field 3 is free. UNCHANGED by the remediation:
-/// this assertion is still there and still load-bearing; added the
-/// compile-time policy pin BESIDE it, because "some node names me" was never
-/// the same claim as "this node is mine".
-test transfer_rejects_a_registry_node_that_does_not_name_it() fail {
-  let unrelated = RegNode {
-    ..decoy_node(),
-    transfer_logic_script: Script(
-      #"bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22",
-    ),
-  }
+// The "registry node that does not name it" test formerly here is gone:
+// `derive_issuance_policy_id_from_registry_node`'s identity assertion was
+// the single binding the decoy-node bypass had to satisfy, and the whole
+// derivation is gone from this handler now — there is no node identity left
+// to assert. The compile-time policy pin (`expected_issuance_policy_id`) is
+// the sole remaining authentication of which policy this script polices.
+
+// ============================================================================
+// PROPERTY: vetting many parties against one denylist covering node authenticates
+// that node once and still runs the covering check for every party.
+// ============================================================================
+//
+// `compliance.verify_parties` remembers the covering node it last
+// authenticated (reference-input index + key + link) and, for the next party
+// citing the SAME index, skips straight to `covers_key`. The tests below pin
+// what that must never change: every party is still compared against the
+// node's bounds, an index that is not a genuine list element still traps on
+// first use, and a negative index never resolves to anything — in particular
+// not to a remembered node.
+
+/// A second clean key that P (01…01 → S) also covers: strictly between them.
+const dl_second_clean_key: ByteArray =
+  #"03030303030303030303030303030303030303030303030303030303"
+
+/// POSITIVE control for the two tests that follow: two senders, both covered
+/// by P, both citing P. The second sender is vetted against the remembered
+/// bounds and passes. Must succeed.
+test shared_covering_node_accepts_two_covered_senders() {
   let tx = Transaction {
     ..base_tx(),
-    inputs: [token_input(10, issuance_policy, dl_sanctioned_key, 1_000)],
-    reference_inputs: [
-      registry_node_input(0, unrelated),
-      gs_utxo(1, 2_000_000, gs_datum(False, False, False, False)),
+    inputs: [
+      token_input(10, issuance_policy, dl_frozen_key, 1_000),
+      token_input(11, issuance_policy, dl_second_clean_key, 1_000),
     ],
-    outputs: [token_utxo(issuance_policy, dl_sanctioned_key, 1_000)],
+    reference_inputs: [
+      registry_node_input(0, genuine_node()),
+      gs_utxo(1, 2_000_000, gs_datum(False, False, False, False)),
+      dl_node_input(2, dl_pred_key, Some(dl_sanctioned_key)),
+    ],
+    outputs: [token_utxo(issuance_policy, dl_frozen_key, 2_000)],
   }
   run_transfer(
     TransferLogicScriptWithdrawRedeemer {
-      registry_node_ref_input_index: 0,
-      global_state_location: GlobalStateReferenced { global_state_ref_input_index: 1 },
-      actions_for_each_input: [],
-      destination_actions: [],
+      global_state_location: GlobalStateReferenced {
+        global_state_ref_input_index: 1,
+      },
+      actions_for_each_input: [src_action(2), src_action(2)],
+      destination_actions: [dst_action(2)],
+    },
+    tx,
+  )
+}
+
+/// Same transaction, but the SECOND sender is S itself — P's link, so P does
+/// not cover it. The first sender primes the remembered node; the second must
+/// still be compared against its bounds and fail. `covers_key` returns False,
+/// which flows into the `and { }` result, hence `!`.
+test shared_covering_node_still_rejects_an_uncovered_second_sender() {
+  let tx = Transaction {
+    ..base_tx(),
+    inputs: [
+      token_input(10, issuance_policy, dl_frozen_key, 1_000),
+      token_input(11, issuance_policy, dl_sanctioned_key, 1_000),
+    ],
+    reference_inputs: [
+      registry_node_input(0, genuine_node()),
+      gs_utxo(1, 2_000_000, gs_datum(False, False, False, False)),
+      dl_node_input(2, dl_pred_key, Some(dl_sanctioned_key)),
+    ],
+    outputs: [token_utxo(issuance_policy, dl_frozen_key, 2_000)],
+  }
+  !run_transfer(
+    TransferLogicScriptWithdrawRedeemer {
+      global_state_location: GlobalStateReferenced {
+        global_state_ref_input_index: 1,
+      },
+      actions_for_each_input: [src_action(2), src_action(2)],
+      destination_actions: [dst_action(2)],
+    },
+    tx,
+  )
+}
+
+/// A negative covering index on the FIRST party is not a valid reference input
+/// and must trap (`safe_list_at` rejects it) — it must never read as "a node
+/// was already remembered". Traps, hence `fail`.
+test negative_covering_index_traps_on_the_first_party() fail {
+  let tx = Transaction {
+    ..base_tx(),
+    inputs: [token_input(10, issuance_policy, dl_frozen_key, 1_000)],
+    reference_inputs: [
+      registry_node_input(0, genuine_node()),
+      gs_utxo(1, 2_000_000, gs_datum(False, False, False, False)),
+      dl_node_input(2, dl_pred_key, Some(dl_sanctioned_key)),
+    ],
+    outputs: [token_utxo(issuance_policy, dl_frozen_key, 1_000)],
+  }
+  run_transfer(
+    TransferLogicScriptWithdrawRedeemer {
+      global_state_location: GlobalStateReferenced {
+        global_state_ref_input_index: 1,
+      },
+      actions_for_each_input: [src_action(-1)],
+      destination_actions: [dst_action(2)],
+    },
+    tx,
+  )
+}
+
+/// The same on a LATER party: the first sender is vetted against P, the
+/// second cites -1. A remembered node must not be mistaken for index -1; the
+/// index is resolved afresh and traps. Traps, hence `fail`.
+test negative_covering_index_traps_on_a_later_party() fail {
+  let tx = Transaction {
+    ..base_tx(),
+    inputs: [
+      token_input(10, issuance_policy, dl_frozen_key, 1_000),
+      token_input(11, issuance_policy, dl_second_clean_key, 1_000),
+    ],
+    reference_inputs: [
+      registry_node_input(0, genuine_node()),
+      gs_utxo(1, 2_000_000, gs_datum(False, False, False, False)),
+      dl_node_input(2, dl_pred_key, Some(dl_sanctioned_key)),
+    ],
+    outputs: [token_utxo(issuance_policy, dl_frozen_key, 2_000)],
+  }
+  run_transfer(
+    TransferLogicScriptWithdrawRedeemer {
+      global_state_location: GlobalStateReferenced {
+        global_state_ref_input_index: 1,
+      },
+      actions_for_each_input: [src_action(2), src_action(-1)],
+      destination_actions: [dst_action(2)],
     },
     tx,
   )

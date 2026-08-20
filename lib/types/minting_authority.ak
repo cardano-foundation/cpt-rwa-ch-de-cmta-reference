@@ -21,20 +21,20 @@ pub type MintingLogicDestinationAction {
 /// this validator's withdraw-0 to be present for any transaction that moves
 /// the security token's supply, but hands this validator NOTHING
 /// pre-verified — this redeemer carries everything needed to decide, and
-/// every input is independently re-resolved and re-checked here. The two
-/// variants differ only in where this token's registry node can be found.
+/// every input is independently re-resolved and re-checked here.
+///
+/// `MintBurn` never reads the registry at all: the issuance policy it
+/// polices is pinned at compile time, and the base layer already
+/// authenticates whichever registry node invoked this withdraw-0 in the
+/// first place. The other three variants still resolve a registry node —
+/// `RegisterMint`/`RegisterStructural` because the node does not exist as a
+/// UTxO yet (it is being created), `UpgradeRegistryNode` because IT is the
+/// one path that may rewrite the node — for CIP-113 structural invariants
+/// only they enforce.
 pub type MintingAuthorityWithdrawRedeemer {
   /// Steady state: the registry node already exists as a UTxO and is
   /// supplied as a reference input.
   MintBurn {
-    /// Index into `self.reference_inputs` — the CIP-113 registry node for
-    /// THIS token. Independently re-resolved and re-verified here (against
-    /// this deployment's known, permanent proxy hash — NOT this script's own
-    /// hash, since the registry node names the proxy) rather than trusted
-    /// from the proxy: without this, a redeemer could name an unrelated
-    /// (decoy) issuance policy, making every check below vacuous while a
-    /// DIFFERENT, real mint under the genuine policy proceeds unchecked.
-    registry_node_ref_input_index: Int,
     /// Index into `self.inputs` — the same GlobalState UTxO the proxy
     /// resolves (shared, transaction-wide data; a wrong index just fails the
     /// NFT check).

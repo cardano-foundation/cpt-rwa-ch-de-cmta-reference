@@ -15,7 +15,7 @@ use denylist/absence.{verify_denylist_absence}
 use kyc/verify.{verify_kyc_proof}
 use types/global_state.{
   GlobalStateDatum, GlobalStateReferenced, GlobalStateSpent,
-  gs_datum_from_location, gs_datum_from_output,
+  gs_datum_from_location,
 }
 use types/kyc_proof.{Attestation, AttestationProof}
 use types/minting_authority.{
@@ -113,18 +113,6 @@ validator minting_authority_validator(
   /// Not circular: `gs_policy → proxy hash → issuance_policy_id → this
   /// validator`, and this validator is compiled last (it is the swappable one).
   expected_issuance_policy_id: ByteArray,
-  /// The CIP-113 programmable-logic base (PLB) script hash — the shared
-  /// payment credential every compliant token UTxO must sit behind.
-  ///
-  /// `verify_mint_destinations` reads the inline STAKE credential as the
-  /// owner identity and, before this parameter existed, asserted nothing at
-  /// all about the payment credential. Supply minted to a plain wallet lives
-  /// outside the programmable base, is never seen by a transfer-logic script
-  /// again, and is freely transferable with no KYC, no denylist and no pause —
-  /// permanently — while still counting against the cap as though it were
-  /// regulated. The failure is silent and on-chain indistinguishable, so it is
-  /// plausibly reachable by accident.
-  plb_script_hash: ByteArray,
   /// The DENYLIST SPEND VALIDATOR's script hash, threaded into
   /// `verify_denylist_absence`. See its doc comment.
   denylist_script_hash: ByteArray,
@@ -164,23 +152,11 @@ validator minting_authority_validator(
     // hash; nothing is trusted from the proxy, which checked nothing.
     when redeemer is {
       MintBurn {
-        registry_node_ref_input_index,
         global_state_input_index,
         power_user_node_ref_input_index,
         minted_amount,
         destination_actions,
       } -> {
-        let issuance_policy_id = utils.derive_issuance_policy_id_from_registry_node(
-          utils.safe_list_at(
-            self.reference_inputs,
-            registry_node_ref_input_index,
-          ).output,
-          registry_policy_id,
-          minting_logic_script_credential_hash,
-          constants.minting_logic_script_registry_node_index,
-        )
-        // Do not inherit this control from unvendored external code.
-        expect issuance_policy_id == expected_issuance_policy_id
         // INVARIANT 1 — see the header. A steady-state mint or burn only
         // ever REFERENCES the registry node; spending one means a
         // `registry_spend` update is riding along on this authorisation.
@@ -194,27 +170,45 @@ validator minting_authority_validator(
               ) > 0
             },
           )
+        // Decode GlobalState ONCE. The NFT check authenticates the UTxO
+        // BEFORE any field of its datum is read; `!deactivated` traps
+        // immediately (INVARIANT 4). The power-users list policy cross-check
+        // moves here (from `verify_mint_or_burn`) so both callers — this one
+        // and `RegisterMint` below — do it once, against the same decoded
+        // field list, instead of the callee re-deriving it per call.
+        let gs_input = utils.safe_list_at(self.inputs, global_state_input_index)
+        expect
+          quantity_of(
+            gs_input.output.value,
+            global_state_policy_id,
+            constants.global_state_asset_name,
+          ) == 1
+        expect InlineDatum(gs_raw) = gs_input.output.datum
+        let fields = builtin.unconstr_fields(gs_raw)
+        expect !global_state.get_deactivated(fields)
+        expect
+          power_users_linked_list_policy_id == global_state.get_power_user_linked_list_policy_id(
+            fields,
+          )
         and {
           // Steady state mints supply and nothing else. The CIP-68 reference
           // NFT is a registration-time artefact; allowing it here would let it
           // be re-minted after the token is live.
           only_permitted_assets_minted(
             self,
-            issuance_policy_id,
+            expected_issuance_policy_id,
             security_asset_name,
             reference_asset_name,
             False,
           ),
           verify_mint_or_burn(
-            issuance_policy_id,
+            expected_issuance_policy_id,
             minted_amount,
-            global_state_input_index,
+            gs_raw,
             power_user_node_ref_input_index,
             destination_actions,
-            global_state_policy_id,
             security_asset_name,
             power_users_linked_list_policy_id,
-            plb_script_hash,
             denylist_script_hash,
             power_user_list_script_hash,
             self,
@@ -228,6 +222,13 @@ validator minting_authority_validator(
         minted_amount,
         destination_actions,
       } -> {
+        // The registration's structural invariants are NOT a base-layer
+        // duplicate: CIP-113 binds only key <-> minting logic and leaves
+        // fields 3-6 free, and it never tells this authority whether an
+        // insert of THIS token's node is actually happening. This call is
+        // what ties `RegisterMint` to that (once-only) insert — the reason it
+        // alone may mint the CIP-68 reference NFT — and what pins the free
+        // fields at genesis.
         let issuance_policy_id = verify_registration_structure(
           registry_node_output_index,
           registry_policy_id,
@@ -236,9 +237,26 @@ validator minting_authority_validator(
           expected_issuance_policy_id,
           self,
         )
-        let gs_datum = gs_datum_from_output(
-          utils.safe_list_at(self.inputs, global_state_input_index).output,
-          global_state_policy_id,
+        // Decode GlobalState ONCE — same shape as the MintBurn call site
+        // above: the NFT check authenticates the UTxO before any field of
+        // its datum is read, and the deactivation trap and power-users
+        // cross-check both run here rather than inside `verify_mint_or_burn`.
+        let gs_input = utils.safe_list_at(self.inputs, global_state_input_index)
+        expect
+          quantity_of(
+            gs_input.output.value,
+            global_state_policy_id,
+            constants.global_state_asset_name,
+          ) == 1
+        expect InlineDatum(gs_raw) = gs_input.output.datum
+        let fields = builtin.unconstr_fields(gs_raw)
+        expect !global_state.get_deactivated(fields)
+        expect
+          power_users_linked_list_policy_id == global_state.get_power_user_linked_list_policy_id(
+            fields,
+          )
+        let admin_credential_hash = global_state.get_admin_credential_hash(
+          fields,
         )
         and {
           // Registration is the one moment the CIP-68 reference NFT may be
@@ -271,7 +289,6 @@ validator minting_authority_validator(
               self,
               issuance_policy_id,
               reference_asset_name,
-              plb_script_hash,
             )?
           } else {
             True
@@ -280,19 +297,17 @@ validator minting_authority_validator(
           // node's key to the proxy but leaves its transfer-logic fields
           // free, so this signature is what stops a stranger registering the
           // token with permissive rules.
-          must_be_signed_by_credential(self, gs_datum.admin_credential_hash)?,
+          must_be_signed_by_credential(self, admin_credential_hash)?,
           // ...and the mint half passes exactly the checks every later mint
           // gets, so a genesis mint is auditable on the same terms.
           verify_mint_or_burn(
             issuance_policy_id,
             minted_amount,
-            global_state_input_index,
+            gs_raw,
             power_user_node_ref_input_index,
             destination_actions,
-            global_state_policy_id,
             security_asset_name,
             power_users_linked_list_policy_id,
-            plb_script_hash,
             denylist_script_hash,
             power_user_list_script_hash,
             self,
@@ -349,6 +364,32 @@ validator minting_authority_validator(
           utils.expect_inline_datum(continuing_node),
         )
 
+        // `next` backstop REMOVED: CIP-113's `registry_spend` already
+        // threads `next` unchanged through an in-place field update — this
+        // deployment relies on that verified base-layer guarantee rather
+        // than re-checking it.
+        // Registry fields 3 and 4 must stay SCRIPT credentials — same
+        // requirement and rationale as `verify_registration_structure`'s
+        // field-3/4 checks: a `VerificationKey` here would leave
+        // `transfer_logic_script` / `third_party_transfer_logic_script`
+        // unable to ever execute as transfer logic, silently disabling the
+        // compliance gates every later transfer relies on. CIP-113 allows
+        // both fields to change on update, so nothing else stands in the
+        // way of an upgrade re-pointing them at a non-script credential.
+        expect Some(out_transfer_logic_data) = list.at(
+          out_fields,
+          constants.transfer_logic_script_registry_node_index,
+        )
+        expect out_transfer_logic: Credential = out_transfer_logic_data
+        expect Script(_) = out_transfer_logic
+
+        expect Some(out_third_party_logic_data) = list.at(
+          out_fields,
+          constants.third_party_transfer_logic_script_registry_node_index,
+        )
+        expect out_third_party_logic: Credential = out_third_party_logic_data
+        expect Script(_) = out_third_party_logic
+
         // Re-assert the two fields the base layer leaves mutable but this
         // deployment treats as permanent.
         //
@@ -402,10 +443,7 @@ validator minting_authority_validator(
           must_be_signed_by_credential(self, gs_datum.admin_credential_hash)?,
         }
       }
-      RegisterStructural {
-        registry_node_output_index,
-        global_state_location,
-      } -> {
+      RegisterStructural { registry_node_output_index, global_state_location } -> {
         let issuance_policy_id = verify_registration_structure(
           registry_node_output_index,
           registry_policy_id,
@@ -504,15 +542,15 @@ fn only_permitted_assets_minted(
 /// registration is structurally a once-only event, so the reference NFT can be
 /// created exactly once in this deployment's lifetime.
 ///
-/// The base layer's own custody rule already forbids any token of this policy
-/// at a non-PLB output, so the address assertion here is defence in depth. The
-/// inline stake credential is what gives the NFT a defined owner, which is who
-/// may later spend it to update the metadata datum.
+/// The base layer's `no_escape` already forbids any token of this policy at
+/// a non-programmable-base output, so only the quantity and the inline stake
+/// credential are checked here. The stake credential is what gives the NFT a
+/// defined owner, which is who may later spend it to update the metadata
+/// datum.
 fn reference_nft_output_is_pinned(
   self: Transaction,
   issuance_policy_id: ByteArray,
   reference_asset_name: ByteArray,
-  plb_script_hash: ByteArray,
 ) -> Bool {
   let carriers = list.filter(
     self.outputs,
@@ -522,8 +560,6 @@ fn reference_nft_output_is_pinned(
   )
   when carriers is {
     [output] -> {
-      expect Script(payment) = output.address.payment_credential
-      expect payment == plb_script_hash
       expect Some(Inline(_owner)) = output.address.stake_credential
       quantity_of(output.value, issuance_policy_id, reference_asset_name) == 1
     }
@@ -576,6 +612,27 @@ fn verify_registration_structure(
   )
   expect quantity_of(self.mint, registry_policy_id, node_asset_name) == 1
 
+  // Registry fields 3 and 4 must be SCRIPT credentials. CIP-113 leaves both
+  // fields free-form, but this deployment's transfer-side compliance can
+  // only run if `registry_spend`'s withdraw-0 mechanism has an actual script
+  // to invoke — a `VerificationKey` here would leave
+  // `transfer_logic_script` / `third_party_transfer_logic_script` unable to
+  // ever execute as transfer logic, silently disabling the compliance gates
+  // every later transfer relies on.
+  expect Some(transfer_logic_data) = list.at(
+    node_fields,
+    constants.transfer_logic_script_registry_node_index,
+  )
+  expect transfer_logic: Credential = transfer_logic_data
+  expect Script(_) = transfer_logic
+
+  expect Some(third_party_logic_data) = list.at(
+    node_fields,
+    constants.third_party_transfer_logic_script_registry_node_index,
+  )
+  expect third_party_logic: Credential = third_party_logic_data
+  expect Script(_) = third_party_logic
+
   // Unfracking is left FORBIDDEN (`empty_vkey` is CIP-113's
   // least-permission value; no ledger transaction can carry a withdrawal
   // keyed by an empty hash, so an unset hook is default-deny).
@@ -602,16 +659,23 @@ fn verify_registration_structure(
 /// derived and verified by the caller (see `withdraw` above); this function
 /// is otherwise a pure decision over (amounts, GlobalState, power user,
 /// destinations).
+///
+/// GlobalState arrives ALREADY AUTHENTICATED as `gs_raw` — the raw datum
+/// `Data` of a UTxO the caller has already NFT-checked. This function must
+/// not re-resolve or re-authenticate it: the deactivation trap and the
+/// power-users list policy cross-check both already ran at the call site,
+/// against the same decoded field list. The only thing left genuinely
+/// conditional on the caller's shape is the full TYPED decode, which only a
+/// mint (`minted_amount > 0`) needs, for destination vetting — a burn pays
+/// no decode at all.
 fn verify_mint_or_burn(
   issuance_policy_id: ByteArray,
   expected_minted_amount: Int,
-  global_state_input_index: Int,
+  gs_raw: Data,
   power_user_node_ref_input_index: Int,
   destination_actions: List<MintingLogicDestinationAction>,
-  global_state_policy_id: ByteArray,
   security_asset_name: ByteArray,
   power_users_linked_list_policy_id: ByteArray,
-  plb_script_hash: ByteArray,
   denylist_script_hash: ByteArray,
   power_user_list_script_hash: ByteArray,
   self: Transaction,
@@ -625,15 +689,6 @@ fn verify_mint_or_burn(
     security_asset_name,
   )
 
-  let gs_input = utils.safe_list_at(self.inputs, global_state_input_index)
-  expect
-    quantity_of(
-      gs_input.output.value,
-      global_state_policy_id,
-      constants.global_state_asset_name,
-    ) == 1
-  // Failing fast if the Token is deactivated
-  expect !global_state.is_deactivated(gs_input, global_state_policy_id)
   let power_user_ref_input = utils.safe_list_at(
     self.reference_inputs,
     power_user_node_ref_input_index,
@@ -672,8 +727,7 @@ fn verify_mint_or_burn(
   //
   // The checks themselves live in `verify_mint_destinations` below.
   let destinations_ok = if minted_amount > 0 {
-    expect InlineDatum(gs_datum_raw) = gs_input.output.datum
-    expect gs_datum: GlobalStateDatum = gs_datum_raw
+    expect gs_datum: GlobalStateDatum = gs_raw
     verify_mint_destinations(
       self.outputs,
       destination_actions,
@@ -682,7 +736,6 @@ fn verify_mint_or_burn(
       security_asset_name,
       gs_datum,
       power_user_node_key,
-      plb_script_hash,
       denylist_script_hash,
       self,
     )
@@ -695,9 +748,14 @@ fn verify_mint_or_burn(
     (minted_amount == expected_minted_amount)?,
     //A power user must have signed the transaction
     must_be_signed_by_credential(self, power_user_node_key)?,
-    //If minted_amount > 0, power user must be minter
+    // A zero-amount mint — e.g. a `RegisterMint` that mints only the CIP-68
+    // reference NFT, with no initial supply — removes nothing from
+    // circulation, so it is a MINT, not a burn: gating it on `can_burn`
+    // would let a burn-only operator perform what is structurally a mint
+    // action merely because its supply delta happens to be zero.
+    //If minted_amount >= 0, power user must be minter
     //If minted_amount < 0, power user must be burner
-    if minted_amount > 0 {
+    if minted_amount >= 0 {
       power_user_data.can_mint
     } else {
       power_user_data.can_burn
@@ -718,7 +776,6 @@ fn verify_mint_destinations(
   security_asset_name: ByteArray,
   gs_datum: GlobalStateDatum,
   power_user_node_key: ByteArray,
-  plb_script_hash: ByteArray,
   denylist_script_hash: ByteArray,
   self: Transaction,
 ) -> Bool {
@@ -726,16 +783,10 @@ fn verify_mint_destinations(
     [] -> True
     [output, ..rest_outputs] ->
       if quantity_of(output.value, issuance_policy_id, security_asset_name) > 0 {
-        // Mints must land INSIDE the programmable-logic base. This used
-        // to be an assumption stated in a comment ("the CIP-113 payment
-        // credential is the shared PLB script") rather than a check; supply
-        // minted anywhere else escapes every later compliance gate for good
-        // while still consuming the cap.
-        expect Script(dest_payment) = output.address.payment_credential
-        expect dest_payment == plb_script_hash
-        // With the payment credential pinned to the shared PLB script, the
-        // inline STAKE credential is the only owner identity to vet. An
-        // enterprise address traps here.
+        // The base layer's `no_escape` already forbids any token of this
+        // policy at a non-programmable-base output, so only the inline
+        // STAKE credential — the owner identity — needs reading here. An
+        // enterprise address (no stake credential at all) still traps.
         // Carry the full `Credential` — a key and a script sharing a hash
         // are different holders, and `seen` must dedupe on both halves or the
         // second of the pair would inherit the first's vetting.
@@ -752,7 +803,6 @@ fn verify_mint_destinations(
             security_asset_name,
             gs_datum,
             power_user_node_key,
-            plb_script_hash,
             denylist_script_hash,
             self,
           )
@@ -802,7 +852,6 @@ fn verify_mint_destinations(
               security_asset_name,
               gs_datum,
               power_user_node_key,
-              plb_script_hash,
               denylist_script_hash,
               self,
             ),
@@ -817,7 +866,6 @@ fn verify_mint_destinations(
           security_asset_name,
           gs_datum,
           power_user_node_key,
-          plb_script_hash,
           denylist_script_hash,
           self,
         )
@@ -1004,6 +1052,28 @@ fn make_gs_ref_input_locked() -> Input {
   }
 }
 
+// The mint-path GlobalState input (SPENT — `make_gs_input`'s shape), but
+// with its `power_user_linked_list_policy_id` field overridden. Models a
+// mis-deployment where the datum's genesis-set copy of the list policy id
+// disagrees with this validator's compile-time parameter.
+fn make_gs_input_with_pu_policy(pu_policy_id: ByteArray) -> Input {
+  let base = make_gs_input(False)
+  expect InlineDatum(raw) = base.output.datum
+  expect gs_datum: GlobalStateDatum = raw
+  Input {
+    ..base,
+    output: Output {
+      ..base.output,
+      datum: InlineDatum(
+        GlobalStateDatum {
+          ..gs_datum,
+          power_user_linked_list_policy_id: pu_policy_id,
+        },
+      ),
+    },
+  }
+}
+
 // A registry node output that ENABLES unfracking — must be rejected.
 fn make_registry_node_output_with_unfracking() -> Output {
   let node = TestRegistryNode {
@@ -1013,6 +1083,39 @@ fn make_registry_node_output_with_unfracking() -> Output {
     transfer_logic_script: Script(test_transfer_logic_hash),
     third_party_transfer_logic_script: Script(test_third_party_logic_hash),
     unfracking_logic_script: Script(test_pu_credential_hash),
+    global_state_cs: test_gs_policy_id,
+  }
+  Output { ..make_registry_ref_input().output, datum: InlineDatum(node) }
+}
+
+// A registry node whose TRANSFER-LOGIC field (3) names a VerificationKey
+// instead of a script. CIP-113 leaves the field free-form; this deployment
+// requires it to be script-gated so the transfer path can actually run.
+fn make_registry_node_output_with_vkey_transfer_logic() -> Output {
+  let node = TestRegistryNode {
+    key: test_issuance_policy_id,
+    next: #"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    minting_logic_script: Script(test_proxy_hash),
+    transfer_logic_script: VerificationKey(test_transfer_logic_hash),
+    third_party_transfer_logic_script: Script(test_third_party_logic_hash),
+    unfracking_logic_script: VerificationKey(#""),
+    global_state_cs: test_gs_policy_id,
+  }
+  Output { ..make_registry_ref_input().output, datum: InlineDatum(node) }
+}
+
+// Same, but the THIRD-PARTY transfer-logic field (4) is the one that names a
+// VerificationKey instead of a script.
+fn make_registry_node_output_with_vkey_third_party_logic() -> Output {
+  let node = TestRegistryNode {
+    key: test_issuance_policy_id,
+    next: #"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    minting_logic_script: Script(test_proxy_hash),
+    transfer_logic_script: Script(test_transfer_logic_hash),
+    third_party_transfer_logic_script: VerificationKey(
+      test_third_party_logic_hash,
+    ),
+    unfracking_logic_script: VerificationKey(#""),
     global_state_cs: test_gs_policy_id,
   }
   Output { ..make_registry_ref_input().output, datum: InlineDatum(node) }
@@ -1279,31 +1382,6 @@ fn make_withdraw_tx(
   }
 }
 
-// Same tx, but a decoy registry node for an unrelated programmable token is
-// prepended to the reference inputs. Reference-input order shifts to
-// 0 = decoy registry, 1 = power-user node, 2 = registry node, 3 = denylist.
-fn make_withdraw_tx_with_decoy_registry(
-  minted_amount: Int,
-  outputs: List<Output>,
-) -> Transaction {
-  let base = make_withdraw_tx(
-    minted_amount,
-    True,
-    False,
-    False,
-    make_denylist_root_ref_input(),
-    outputs,
-    [test_pu_credential_hash],
-  )
-  Transaction {
-    ..base,
-    reference_inputs: list.push(
-      base.reference_inputs,
-      make_decoy_registry_ref_input(),
-    ),
-  }
-}
-
 // Structurally invalid KYC proof — only reachable when receiver KYC is
 // required, where it must make the destination check fail.
 fn dummy_proof() {
@@ -1337,7 +1415,6 @@ fn run_withdraw_cip68_disabled(
     test_pu_policy_id,
     test_proxy_hash,
     test_issuance_policy_id,
-    test_plb_hash,
     test_denylist_script_hash,
     test_pu_script_hash,
     test_security_asset_name,
@@ -1355,7 +1432,6 @@ fn run_withdraw(redeemer: MintingAuthorityWithdrawRedeemer, tx: Transaction) {
     test_pu_policy_id,
     test_proxy_hash,
     test_issuance_policy_id,
-    test_plb_hash,
     test_denylist_script_hash,
     test_pu_script_hash,
     test_reference_asset_name,
@@ -1370,7 +1446,6 @@ fn run_withdraw(redeemer: MintingAuthorityWithdrawRedeemer, tx: Transaction) {
 test mint_succeeds_with_clean_destination_no_receiver_kyc() {
   let amount = 1_000
   let redeemer = MintBurn {
-    registry_node_ref_input_index: 1,
     global_state_input_index: 0,
     power_user_node_ref_input_index: 0,
     minted_amount: amount,
@@ -1393,7 +1468,6 @@ test mint_succeeds_with_clean_destination_no_receiver_kyc() {
 test mint_fails_when_destination_denylisted() {
   let amount = 1_000
   let redeemer = MintBurn {
-    registry_node_ref_input_index: 1,
     global_state_input_index: 0,
     power_user_node_ref_input_index: 0,
     minted_amount: amount,
@@ -1416,7 +1490,6 @@ test mint_fails_when_destination_denylisted() {
 test mint_fails_when_receiver_kyc_required_but_proof_invalid() {
   let amount = 1_000
   let redeemer = MintBurn {
-    registry_node_ref_input_index: 1,
     global_state_input_index: 0,
     power_user_node_ref_input_index: 0,
     minted_amount: amount,
@@ -1439,7 +1512,6 @@ test mint_fails_when_receiver_kyc_required_but_proof_invalid() {
 test mint_to_authorizing_power_user_bypasses_receiver_kyc() {
   let amount = 1_000
   let redeemer = MintBurn {
-    registry_node_ref_input_index: 1,
     global_state_input_index: 0,
     power_user_node_ref_input_index: 0,
     minted_amount: amount,
@@ -1462,7 +1534,6 @@ test mint_to_authorizing_power_user_bypasses_receiver_kyc() {
 test mint_fails_when_destination_action_missing() fail {
   let amount = 1_000
   let redeemer = MintBurn {
-    registry_node_ref_input_index: 1,
     global_state_input_index: 0,
     power_user_node_ref_input_index: 0,
     minted_amount: amount,
@@ -1485,7 +1556,6 @@ test mint_fails_when_destination_action_missing() fail {
 test burn_succeeds_without_destination_checks() {
   let amount = -1_000
   let redeemer = MintBurn {
-    registry_node_ref_input_index: 1,
     global_state_input_index: 0,
     power_user_node_ref_input_index: 0,
     minted_amount: amount,
@@ -1508,7 +1578,6 @@ test burn_succeeds_without_destination_checks() {
 test mint_to_enterprise_address_is_rejected() fail {
   let amount = 1_000
   let redeemer = MintBurn {
-    registry_node_ref_input_index: 1,
     global_state_input_index: 0,
     power_user_node_ref_input_index: 0,
     minted_amount: amount,
@@ -1533,7 +1602,6 @@ test mint_to_enterprise_address_is_rejected() fail {
 test mint_authority_withdraw_fails_when_not_signed_by_power_user() {
   let amount = 1_000
   let redeemer = MintBurn {
-    registry_node_ref_input_index: 1,
     global_state_input_index: 0,
     power_user_node_ref_input_index: 0,
     minted_amount: amount,
@@ -1556,7 +1624,6 @@ test mint_authority_withdraw_fails_when_not_signed_by_power_user() {
 test mint_authority_withdraw_fails_when_minting_without_mint_permission() {
   let amount = 1_000
   let redeemer = MintBurn {
-    registry_node_ref_input_index: 1,
     global_state_input_index: 0,
     power_user_node_ref_input_index: 0,
     minted_amount: amount,
@@ -1576,55 +1643,14 @@ test mint_authority_withdraw_fails_when_minting_without_mint_permission() {
   )
 }
 
-// ── registry-node resolution (independent re-derivation) ────────────────────
+// ── power-user list policy id cross-check ────────────────────────────────────
 
-test mint_succeeds_when_another_tokens_registry_node_sorts_first() {
-  // Reference-input order with the decoy prepended: 0 = decoy registry,
-  // 1 = power-user node, 2 = registry node, 3 = denylist — so the covering
-  // proof index shifts to 3 (clean_dest_action()'s hardcoded 2 would name
-  // the registry node instead).
+test mint_succeeds_when_global_state_power_user_policy_id_matches() {
+  // POSITIVE CONTROL. Same shape as `mint_succeeds_with_clean_destination_no_receiver_kyc`,
+  // spelled out explicitly here so it differs from the negative test below in
+  // exactly the GlobalState input's `power_user_linked_list_policy_id`.
   let amount = 1_000
   let redeemer = MintBurn {
-    registry_node_ref_input_index: 2,
-    global_state_input_index: 0,
-    power_user_node_ref_input_index: 1,
-    minted_amount: amount,
-    destination_actions: [
-      MintingLogicDestinationAction {
-        destination_proof: dummy_proof(),
-        destination_denylist_covering_ref_input_index: 3,
-      },
-    ],
-  }
-  run_withdraw(
-    redeemer,
-    make_withdraw_tx_with_decoy_registry(amount, [make_dest_output(amount)]),
-  )
-}
-
-test mint_fails_when_registry_index_points_at_another_tokens_node() fail {
-  let amount = 1_000
-  let redeemer = MintBurn {
-    registry_node_ref_input_index: 0,
-    global_state_input_index: 0,
-    power_user_node_ref_input_index: 1,
-    minted_amount: amount,
-    destination_actions: [clean_dest_action()],
-  }
-  run_withdraw(
-    redeemer,
-    make_withdraw_tx_with_decoy_registry(amount, [make_dest_output(amount)]),
-  )
-}
-
-test mint_fails_when_registry_names_neither_proxy_nor_self() fail {
-  // Confused-deputy defense: a redeemer cannot point at a registry node that
-  // does not genuinely name THIS deployment's proxy — closing the
-  // decoy-policy attack the redeemer type's doc comment describes (this
-  // authority never trusts a redeemer-supplied issuance_policy_id directly).
-  let amount = 1_000
-  let redeemer = MintBurn {
-    registry_node_ref_input_index: 0,
     global_state_input_index: 0,
     power_user_node_ref_input_index: 0,
     minted_amount: amount,
@@ -1632,25 +1658,97 @@ test mint_fails_when_registry_names_neither_proxy_nor_self() fail {
   }
   run_withdraw(
     redeemer,
-    make_withdraw_tx(
-      amount,
-      True,
-      False,
-      False,
-      make_denylist_root_ref_input(),
-      [make_dest_output(amount)],
-      [test_pu_credential_hash],
-    )
-      |> fn(tx) {
-          Transaction {
-            ..tx,
-            reference_inputs: [
-              make_decoy_registry_ref_input(),
-              make_registry_ref_input(),
-              make_denylist_root_ref_input(),
-            ],
-          }
-        },
+    Transaction {
+      ..make_withdraw_tx(
+        amount,
+        True,
+        False,
+        False,
+        make_denylist_root_ref_input(),
+        [make_dest_output(amount)],
+        [test_pu_credential_hash],
+      ),
+      inputs: [make_gs_input_with_pu_policy(test_pu_policy_id)],
+    },
+  )
+}
+
+test mint_fails_when_global_state_power_user_policy_id_mismatches() fail {
+  // The GlobalState datum's own `power_user_linked_list_policy_id` must
+  // agree with this deployment's compile-time parameter (`test_pu_policy_id`,
+  // as supplied by `run_withdraw`). Traps at the cross-check `expect` in
+  // `verify_mint_or_burn`, before the power-user node is even looked up.
+  let amount = 1_000
+  let redeemer = MintBurn {
+    global_state_input_index: 0,
+    power_user_node_ref_input_index: 0,
+    minted_amount: amount,
+    destination_actions: [clean_dest_action()],
+  }
+  run_withdraw(
+    redeemer,
+    Transaction {
+      ..make_withdraw_tx(
+        amount,
+        True,
+        False,
+        False,
+        make_denylist_root_ref_input(),
+        [make_dest_output(amount)],
+        [test_pu_credential_hash],
+      ),
+      inputs: [
+        make_gs_input_with_pu_policy(
+          #"9999999999999999999999999999999999999999999999999999999999",
+        ),
+      ],
+    },
+  )
+}
+
+// ── registry read removed from MintBurn ──────────────────────────────────────
+//
+// The three tests formerly here (resolving among decoy registry nodes,
+// rejecting a wrong index, rejecting a node that names neither the proxy nor
+// itself) pinned MintBurn's independent re-derivation of the issuance policy
+// from a redeemer-cited registry node. That re-derivation is gone: the
+// policy is pinned at compile time, and the base layer already authenticates
+// whichever node invoked this withdraw-0. This positive test replaces them —
+// proving the removal is real by omitting the registry node entirely.
+
+test mint_succeeds_without_any_registry_reference_input() {
+  // No registry node anywhere in this transaction — reference inputs are
+  // power-user node (0) and denylist root (1); the registry node every
+  // other fixture above keeps, unused, at index 1 is simply absent here.
+  let amount = 1_000
+  let redeemer = MintBurn {
+    global_state_input_index: 0,
+    power_user_node_ref_input_index: 0,
+    minted_amount: amount,
+    destination_actions: [
+      MintingLogicDestinationAction {
+        destination_proof: dummy_proof(),
+        destination_denylist_covering_ref_input_index: 1,
+      },
+    ],
+  }
+  run_withdraw(
+    redeemer,
+    Transaction {
+      ..make_withdraw_tx(
+        amount,
+        True,
+        False,
+        False,
+        make_denylist_root_ref_input(),
+        [make_dest_output(amount)],
+        [test_pu_credential_hash],
+      ),
+      reference_inputs: [
+        make_pu_node_ref_input(True, False),
+        make_denylist_root_ref_input(),
+      ],
+    },
   )
 }
 
@@ -1770,6 +1868,65 @@ test register_mint_fails_when_node_output_names_another_minting_logic() fail {
   )
 }
 
+// ── zero-amount mint is a mint, not a burn ───────────────────────────────────
+
+// A registration whose first mint carries NO initial supply — only the
+// CIP-68 reference NFT. Mirrors `make_register_mint_tx`, but threads
+// `can_burn` through independently (that fixture hardcodes it to `False`)
+// so a can-burn-only operator can be modelled, and layers the reference NFT
+// mint/output on top.
+fn make_register_mint_reference_only_tx(
+  can_mint: Bool,
+  can_burn: Bool,
+) -> Transaction {
+  let amount = 0
+  let base = make_withdraw_tx(
+    amount,
+    can_mint,
+    can_burn,
+    False,
+    make_denylist_root_ref_input(),
+    [],
+    [test_pu_credential_hash],
+  )
+  Transaction {
+    ..base,
+    inputs: [make_gs_input_with_admin()],
+    reference_inputs: [
+      make_pu_node_ref_input(can_mint, can_burn),
+      make_denylist_root_ref_input(),
+    ],
+    outputs: [make_registry_ref_input().output, make_reference_nft_output()],
+    mint: merge(
+      merge(base.mint, from_asset(test_registry_policy_id, "Node", 1)),
+      from_asset(test_issuance_policy_id, test_reference_asset_name, 1),
+    ),
+    extra_signatories: [test_pu_credential_hash, test_admin_hash],
+  }
+}
+
+test register_mint_reference_only_succeeds_with_mint_only_operator() {
+  // A `RegisterMint` that carries no initial supply — only the CIP-68
+  // reference NFT — mints ZERO of the security asset. That is still a MINT
+  // (see the role-gate doc comment in `verify_mint_or_burn`), so a
+  // `can_mint`-only operator must be able to authorise it.
+  run_withdraw(
+    register_mint_redeemer(0),
+    make_register_mint_reference_only_tx(True, False),
+  )
+}
+
+test register_mint_reference_only_fails_with_burn_only_operator() {
+  // Same transaction, differing in exactly the power user's role flags: a
+  // `can_burn`-only operator must not be able to authorise a zero-amount
+  // mint just because the supply delta happens to read as non-positive
+  // under the old `> 0` gate.
+  !run_withdraw(
+    register_mint_redeemer(0),
+    make_register_mint_reference_only_tx(False, True),
+  )
+}
+
 // ── RegisterStructural: registration with no mint ───────────────────────────
 
 fn make_register_structural_tx(
@@ -1798,7 +1955,9 @@ fn make_register_structural_tx(
 fn register_structural_redeemer() -> MintingAuthorityWithdrawRedeemer {
   RegisterStructural {
     registry_node_output_index: 0,
-    global_state_location: GlobalStateReferenced { global_state_ref_input_index: 0 },
+    global_state_location: GlobalStateReferenced {
+      global_state_ref_input_index: 0,
+    },
   }
 }
 
@@ -1877,6 +2036,29 @@ test register_mint_may_also_mint_the_cip68_reference_nft() {
   )
 }
 
+/// NEGATIVE TWIN. POSITIVE CONTROL:
+/// `register_mint_may_also_mint_the_cip68_reference_nft`, whose reference-NFT
+/// output differs from this one in exactly the stake credential
+/// (`Some(Inline(...))` there, `None` here). With no stake credential,
+/// `reference_nft_output_is_pinned`'s
+/// `expect Some(Inline(_owner)) = output.address.stake_credential` traps —
+/// hence `fail`.
+test register_mint_rejects_a_reference_nft_without_stake_credential() fail {
+  run_withdraw(
+    register_mint_redeemer(1_000),
+    register_mint_with_reference_tx(
+      1,
+      Output {
+        ..make_reference_nft_output(),
+        address: Address {
+          payment_credential: Script(test_plb_hash),
+          stake_credential: None,
+        },
+      },
+    ),
+  )
+}
+
 /// The reference NFT is an NFT. Two of them would be a second, uncapped supply
 /// under the security token's own policy id.
 test register_mint_rejects_a_reference_quantity_above_one() {
@@ -1890,25 +2072,6 @@ test register_mint_rejects_a_reference_quantity_above_one() {
           from_lovelace(2_000_000),
           from_asset(test_issuance_policy_id, test_reference_asset_name, 2),
         ),
-      },
-    ),
-  )
-}
-
-/// It must land somewhere with a defined owner, inside the programmable base.
-/// The payment-credential pattern match traps on a wallet address, hence
-/// `fail` rather than `!`.
-test register_mint_rejects_a_reference_nft_outside_the_base() fail {
-  run_withdraw(
-    register_mint_redeemer(1_000),
-    register_mint_with_reference_tx(
-      1,
-      Output {
-        ..make_reference_nft_output(),
-        address: Address {
-          payment_credential: VerificationKey(test_dest_stake_hash),
-          stake_credential: None,
-        },
       },
     ),
   )
@@ -1954,7 +2117,6 @@ test steady_state_mint_rejects_the_reference_nft() {
   )
   !run_withdraw(
     MintBurn {
-      registry_node_ref_input_index: 1,
       global_state_input_index: 0,
       power_user_node_ref_input_index: 0,
       minted_amount: amount,
@@ -2049,6 +2211,35 @@ test register_structural_fails_when_unfracking_is_enabled() fail {
   )
 }
 
+test register_structural_fails_when_transfer_logic_is_not_a_script() fail {
+  // Field 3 must be script-gated so the transfer side actually runs — a
+  // `VerificationKey` here would make `transfer_logic_script` unable to
+  // ever execute as transfer logic. POSITIVE CONTROL:
+  // `register_structural_succeeds_when_admin_signs`, whose node (via
+  // `make_register_structural_tx` -> `make_registry_ref_input`) differs
+  // from this one in exactly this field.
+  let base = make_register_structural_tx(zero, [test_admin_hash])
+  run_withdraw(
+    register_structural_redeemer(),
+    Transaction {
+      ..base,
+      outputs: [make_registry_node_output_with_vkey_transfer_logic()],
+    },
+  )
+}
+
+test register_structural_fails_when_third_party_logic_is_not_a_script() fail {
+  // Same requirement, field 4. POSITIVE CONTROL: same as above.
+  let base = make_register_structural_tx(zero, [test_admin_hash])
+  run_withdraw(
+    register_structural_redeemer(),
+    Transaction {
+      ..base,
+      outputs: [make_registry_node_output_with_vkey_third_party_logic()],
+    },
+  )
+}
+
 test register_structural_fails_when_no_registry_nft_is_minted() fail {
   // No registry NFT minted means this is an in-place node UPDATE, not an
   // insert — that path re-points transfer logic and must never be reachable
@@ -2118,6 +2309,24 @@ fn make_upgraded_node_output(
   Output { ..make_registry_ref_input().output, datum: InlineDatum(node) }
 }
 
+// Same shape as `make_upgraded_node_output`, but with the THIRD-PARTY
+// transfer-logic field (4) — which that fixture hardcodes to a script —
+// swapped for a VerificationKey instead.
+fn make_upgraded_node_output_with_vkey_third_party_logic() -> Output {
+  let node = TestRegistryNode {
+    key: test_issuance_policy_id,
+    next: #"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    minting_logic_script: Script(test_proxy_hash),
+    transfer_logic_script: Script(test_new_transfer_logic_hash),
+    third_party_transfer_logic_script: VerificationKey(
+      test_third_party_logic_hash,
+    ),
+    unfracking_logic_script: VerificationKey(#""),
+    global_state_cs: test_gs_policy_id,
+  }
+  Output { ..make_registry_ref_input().output, datum: InlineDatum(node) }
+}
+
 fn make_upgrade_tx(
   node_output: Output,
   gs_ref: Input,
@@ -2149,7 +2358,9 @@ fn upgrade_redeemer() -> MintingAuthorityWithdrawRedeemer {
   UpgradeRegistryNode {
     registry_node_input_index: 0,
     registry_node_output_index: 0,
-    global_state_location: GlobalStateReferenced { global_state_ref_input_index: 0 },
+    global_state_location: GlobalStateReferenced {
+      global_state_ref_input_index: 0,
+    },
   }
 }
 
@@ -2375,6 +2586,41 @@ test upgrade_cannot_enable_unfracking() fail {
   )
 }
 
+test upgrade_cannot_repoint_transfer_logic_to_a_non_script() fail {
+  // Field 3 must stay script-gated. POSITIVE CONTROL:
+  // `upgrade_repoints_transfer_logic_when_admin_signs`, whose continuing
+  // node differs from this one in exactly this field (`Script` there,
+  // `VerificationKey` here, same underlying hash).
+  run_withdraw(
+    upgrade_redeemer(),
+    make_upgrade_tx(
+      make_upgraded_node_output(
+        VerificationKey(test_new_transfer_logic_hash),
+        VerificationKey(#""),
+        test_gs_policy_id,
+      ),
+      make_gs_ref_input(),
+      [test_admin_hash],
+    ),
+  )
+}
+
+test upgrade_cannot_repoint_third_party_logic_to_a_non_script() fail {
+  // Same requirement, field 4. POSITIVE CONTROL: same as above.
+  run_withdraw(
+    upgrade_redeemer(),
+    make_upgrade_tx(
+      make_upgraded_node_output_with_vkey_third_party_logic(),
+      make_gs_ref_input(),
+      [test_admin_hash],
+    ),
+  )
+}
+
+// `next`-backstop test removed: that property is now delegated to the base
+// layer (CIP-113's `registry_spend` already threads `next` unchanged through
+// an in-place field update).
+
 test upgrade_cannot_change_supply() fail {
   // An upgrade changes rules, never supply.
   let base = make_upgrade_tx(
@@ -2457,7 +2703,9 @@ test upgrade_cannot_aim_the_field_checks_at_a_decoy_output() fail {
     UpgradeRegistryNode {
       registry_node_input_index: 0,
       registry_node_output_index: 0,
-      global_state_location: GlobalStateReferenced { global_state_ref_input_index: 0 },
+      global_state_location: GlobalStateReferenced {
+        global_state_ref_input_index: 0,
+      },
     },
     Transaction { ..base, outputs: [decoy_clean_datum, real_node_hijacked] },
   )
@@ -2473,7 +2721,6 @@ test publish_accepts_credential_registration() {
     test_pu_policy_id,
     test_proxy_hash,
     test_issuance_policy_id,
-    test_plb_hash,
     test_denylist_script_hash,
     test_pu_script_hash,
     test_reference_asset_name,
@@ -2502,7 +2749,6 @@ test publish_rejects_credential_deregistration() {
     test_pu_policy_id,
     test_proxy_hash,
     test_issuance_policy_id,
-    test_plb_hash,
     test_denylist_script_hash,
     test_pu_script_hash,
     test_reference_asset_name,

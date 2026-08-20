@@ -69,9 +69,10 @@ v1.1.23 does not resolve a dependency's own manifest. `aiken-lang/fuzz` and
 why.
 
 The upgrade also made the compliance path measurably **cheaper** — the denylist absence proof
-dropped from ~48.6M to ~31.8M CPU units — which matters because execution-budget exhaustion on the
-transfer path is still an unexamined denial-of-service surface (see
-[what is still open](#what-is-still-open)).
+dropped from ~48.6M to ~31.8M CPU units — which matters for the per-party execution cost measured by
+the `aiken bench` scaling benches on the transfer and seizure paths (see
+[what is still open](#what-is-still-open) and the README's *Execution budget and transaction
+sizing* section).
 
 ---
 
@@ -202,10 +203,13 @@ separately reads a **redeemer-chosen** node to decide what to police. Nothing ti
 ### The fix
 
 Pin the policy id at compile time. Both validators gained an `expected_issuance_policy_id`
-parameter, asserted immediately after derivation:
+parameter, asserted immediately after derivation, in the `withdraw` handler right after the
+registry-node lookup:
 
-- `validators/transfer_logic_script.ak:75`
-- `validators/third_party_transfer_logic_script.ak:95`
+- `transfer_logic_validator.withdraw`, `expect issuance_policy_id == expected_issuance_policy_id`
+  (`validators/transfer_logic_script.ak:91`)
+- `third_party_transfer_logic_validator.withdraw`, the same assertion
+  (`validators/third_party_transfer_logic_script.ak:107`)
 
 **There is no circularity.** A registry node's key derives from the *minting* logic hash, never from
 these scripts' hashes, so the issuance policy id is known before either script is compiled. The
@@ -218,6 +222,12 @@ compile-time expectation.
 **Pinned by** `transfer_rejects_a_foreign_registry_node`, `seizure_rejects_a_foreign_registry_node`,
 and — as the control that proves the pin did not simply break the path —
 `transfer_rejects_a_sanctioned_sender_via_the_genuine_node`.
+
+**Later hardening (2026-08-20):** the registry node is no longer consulted at all on the transfer,
+seizure or mint-burn paths — the issuance policy id is pinned at compile time, with no runtime
+registry-node derivation or identity check left to bypass. `transfer_rejects_a_foreign_registry_node`
+and `seizure_rejects_a_foreign_registry_node` were retired as moot: the decoy-node construction they
+guarded against is no longer expressible once the redeemer carries no registry-node index at all.
 
 ---
 
@@ -349,11 +359,15 @@ arbitrary real supply.
 ### The fix
 
 Do not inherit a control this critical. `minting_authority_validator` gained
-`expected_issuance_policy_id`, asserted at every derivation site:
+`expected_issuance_policy_id`, asserted at every derivation site (all in
+`validators/minting_authority.ak`):
 
-- `:170` — `MintBurn`
-- `:274` — `UpgradeRegistryNode` (the spent node; the continuing node is already compared against it)
-- `:456` — inside `verify_registration_structure`, shared by `RegisterMint` and `RegisterStructural`
+- the `MintBurn` branch, immediately after deriving `issuance_policy_id` from the referenced
+  registry node (line 183)
+- the `UpgradeRegistryNode` branch, on the spent node (the continuing node is already compared
+  against it) (line 322)
+- inside `verify_registration_structure`, shared by `RegisterMint` and `RegisterStructural`
+  (line 609)
 
 Not circular: `gs_policy → proxy hash → issuance_policy_id → this validator`, and this validator is
 compiled last precisely because it is the swappable one.
@@ -423,18 +437,36 @@ the discrepancy. Plausibly reachable by accident, since the failure is silent.
 ### The fix
 
 `minting_authority_validator` gained a `plb_script_hash` parameter, and every token-bearing output
-must sit behind it (`validators/minting_authority.ak:712`).
+must sit behind it — `verify_mint_destinations`, `expect dest_payment == plb_script_hash`
+(`validators/minting_authority.ak:817`).
 
 **Extended to the transfer path as well**, but only after reading the base layer. The review
 explicitly warned against doing this blind, because a legitimate flow might produce a token-bearing
 output outside the base. Having confirmed the base layer forbids escape on transfers too, the pin
-was added to both transfer validators (`transfer_logic_script.ak:143`,
-`third_party_transfer_logic_script.ak:120`) as **defence in depth** — not as the load-bearing
-control. It earns its place because the surrounding code reads the stake credential *as if* the
-payment credential were the base script; asserting it makes that true by construction.
+was added to both transfer validators' `withdraw` handlers as **defence in depth** — not as the
+load-bearing control: `transfer_logic_validator.withdraw`'s sender fold
+(`expect src_payment == plb_script_hash`, `validators/transfer_logic_script.ak:150`) and
+destination fold (`expect dest_payment == plb_script_hash`,
+`validators/transfer_logic_script.ak:185`), and
+`third_party_transfer_logic_validator.withdraw`'s destination fold (same assertion,
+`validators/third_party_transfer_logic_script.ak:148`). It earns its place because the surrounding
+code reads the stake credential *as if* the payment credential were the base script; asserting it
+makes that true by construction.
 
 **Pinned by** `mint_rejects_a_destination_outside_the_programmable_logic_base` and
 `transfer_rejects_a_destination_outside_the_programmable_logic_base`.
+
+**Later hardening (2026-08-20):** the programmable-base payment-credential pin described above was
+removed from the mint path (`verify_mint_destinations`, `reference_nft_output_is_pinned`) and from
+the ordinary-transfer path (both the sender and destination folds in
+`transfer_logic_validator.withdraw`), in favour of relying directly on the base layer's own custody
+guarantees — see the "Minted supply is confined to programmable-base addresses" and "Transfers cannot
+move tokens out of the base, and conserve value" rows in
+[the base-layer table](#what-the-cip-113-base-layer-actually-guarantees). The pin is **kept** on the
+seizure path (`third_party_transfer_logic_validator`), because that guarantee was not independently
+verified — see the same table. `mint_rejects_a_destination_outside_the_programmable_logic_base` and
+`transfer_rejects_a_destination_outside_the_programmable_logic_base` were retired alongside the
+removal, since the payment-credential pin they each pinned no longer exists on those two paths.
 
 ---
 
@@ -453,7 +485,8 @@ every spend runs the same validator.
 
 ### The fix
 
-ADA may be added but never removed (`validators/global_state.ak:253`):
+ADA may be added but never removed — `global_state_spend_validator.spend`, the `value_preserved`
+binding (`validators/global_state.ak:271`):
 
 ```aiken
 assets.lovelace_of(global_state_output.value) >= assets.lovelace_of(own_input.output.value)
@@ -616,16 +649,16 @@ The base layer is not vendored here, so several severity judgements originally r
 assumptions. Those were checked by reading
 `cardano-foundation/cip113-programmable-tokens` at `feat/upgradability-in-place` (commit `018415d`).
 
-| Claim | Verdict | Evidence |
-|---|---|---|
-| Registry field 2 is cryptographically bound to the node's key | **True** | `registry_mint` calls `is_programmable_token_id_valid(key, …, minting_logic_script)` — the key is *derived* from the template parameterised with that credential |
-| Registry keys are unique | **True** | `validate_directory_node_output` asserts `key < next` on **both** insert outputs, forcing `covering.key < new.key < covering.next`; in a sorted list a duplicate is unconstructible |
-| Registry fields 3 and 4 are free | **True — confirmed the defect** | `is_inserted_directory_node` only length-checks them |
-| A stranger can register a node naming someone else's minting logic | **False** — a protection that was not assumed | `RegistryInsert` requires that credential's own withdraw-0 ("proof of instance") |
-| Minted supply is confined to programmable-base addresses | **True** | `issuance_mint`'s `no_escape` forbids the policy at any non-base output and requires an inline stake credential on every base output |
-| Transfers cannot move tokens out of the base, and conserve value | **True** | the transfer path requires base outputs ⊇ base inputs per policy, which with ledger value-conservation forbids escape |
-| This deployment's transfer logic runs on every spend of its token | **True** | `has_withdrawal(transfer_logic_script)` is required for every input policy proved to exist |
-| The seizure path is the only one that skips owner consent | **True** | the third-party path never calls `authorised_stake_cred`; the transfer path always does |
+| Claim | Verdict | Evidence | Relied upon by |
+|---|---|---|---|
+| Registry field 2 is cryptographically bound to the node's key | **True** | `registry_mint` calls `is_programmable_token_id_valid(key, …, minting_logic_script)` — the key is *derived* from the template parameterised with that credential | `MintBurn`'s registry-node read removal (2026-08-20) — no independent field-2 identity re-check on mint or burn |
+| Registry keys are unique | **True** | `validate_directory_node_output` asserts `key < next` on **both** insert outputs, forcing `covering.key < new.key < covering.next`; in a sorted list a duplicate is unconstructible | Same as above — rules out a duplicate node at this policy's key |
+| Registry fields 3 and 4 are free | **True — confirmed the defect** | `is_inserted_directory_node` only length-checks them | — |
+| A stranger can register a node naming someone else's minting logic | **False** — a protection that was not assumed | `RegistryInsert` requires that credential's own withdraw-0 ("proof of instance") | — |
+| Minted supply is confined to programmable-base addresses | **True** | `issuance_mint`'s `no_escape` forbids the policy at any non-base output and requires an inline stake credential on every base output | The mint-path programmable-base payment-credential pin removal (2026-08-20) |
+| Transfers cannot move tokens out of the base, and conserve value | **True** | the transfer path requires base outputs ⊇ base inputs per policy, which with ledger value-conservation forbids escape | The ordinary-transfer-path programmable-base payment-credential pin removal (2026-08-20) |
+| This deployment's transfer logic runs on every spend of its token | **True** | `has_withdrawal(transfer_logic_script)` is required for every input policy proved to exist | `transfer_logic_validator`/`third_party_transfer_logic_validator`'s registry-node read removal (2026-08-20) — no independent registry lookup on transfer or seizure |
+| The seizure path is the only one that skips owner consent | **True** | the third-party path never calls `authorised_stake_cred`; the transfer path always does | — |
 
 Two things this settled:
 
@@ -736,11 +769,17 @@ Grant the two roles together to whoever is expected to perform court- or regulat
 
 **Not attacked, and worth picking up:**
 
-- **Execution-budget exhaustion.** The transfer path folds over every input and output with a
-  linked-list authentication per party, and now does slightly more work per party. No attempt was
-  made to construct a transaction that passes every check but exceeds the script budget — which
-  would be a denial of service on large transfers. The regression suite prints execution units per
-  test, which is a usable starting point.
+- **Execution-budget exhaustion.** This is now measured rather than merely suspected. Two
+  `aiken bench` scaling benchmarks — `transfer_cost_by_party_count` in
+  `validators/transfer_logic_script.ak` and `seizure_cost_by_destination_count` in
+  `validators/third_party_transfer_logic_script.ak` — profile cost as party/destination count grows.
+  Cost is dominated by per-party denylist covering-node authentication, plus one Ed25519
+  verification when KYC applies; memory binds before CPU; and the covering node is now authenticated
+  once per run of adjacent parties citing the same node, rather than once per party. The README's
+  *Execution budget and transaction sizing* section states the measured per-party costs and gives
+  conservative per-transaction maxima at 25% of the shared CIP-113 budget. What remains open is the
+  cost of the CIP-113 base layer's own scripts running in the same transaction — this deployment's
+  scripts were measured in isolation.
 - **Merkle-Patricia-Forestry proof forgery.** The membership variant was analysed only at the
   binding level. No attempt was made against the vendored library.
 - **Attestation replay and revocation windows.** The operational consequence of an attestation
@@ -753,3 +792,30 @@ Grant the two roles together to whoever is expected to perform court- or regulat
   hand-built `Transaction`. None is confirmed against a real ledger. The intended ladder is
   `aiken check` → Yaci devnet → preview, and skipping a rung tells you very little about *why*
   something failed.
+
+### Later hardening — 2026-08-20
+
+After the eleven defects above, a further round of defence-in-depth changes was made, none of them
+answers to a newly found exploit: GlobalState datum size caps (on entity count and on the serialised
+sizes of `security_info` and metadata) are now enforced both at genesis and on every mutation; admin
+actions on GlobalState may no longer move the security token in the same transaction, closing the
+possibility of bundling a pre-state change with a transfer or seizure; the list spend validators now
+bind the spend to an input that carries the corresponding list token; list keys must be exactly 28
+bytes; CIP-113 registry fields 3 and 4 must be script credentials both on registration and on
+upgrade; the compile-time power-users policy id is now cross-checked against the GlobalState field on
+the mint path, and the seizure validator no longer compiles it in at all — it reads the power-users
+policy id from the NFT-authenticated GlobalState datum, so GlobalState is the single root of trust
+for that lookup; and zero-amount mints now require `can_mint`. Alongside these, the
+test suite gained a genesis validator test, power-users branch coverage, a membership-KYC end-to-end
+test, and memo regression tests, and the toolchain was pinned with a CI reproducibility gate added to
+catch drift between the committed blueprint and a fresh build.
+
+A later same-day pass removed the registry-node read on the transfer, seizure and mint-burn paths and
+the mint- and ordinary-transfer-path programmable-base payment-credential pins in favour of the
+base-layer guarantees in [the table above](#what-the-cip-113-base-layer-actually-guarantees), and
+collapsed the mint path's GlobalState decode to run once per transaction instead of at every call
+site. The same three removals were independently requested, in review comments on upstream PR
+[cardano-foundation/cpt-rwa-ch-de-cmta-reference#2](https://github.com/cardano-foundation/cpt-rwa-ch-de-cmta-reference/pull/2):
+that the programmable-base pin parameter and destination pin are redundant with the CIP-113 core, and
+that the programmable-token policy id should be passed as a validator parameter rather than
+recomputed from the registry node.

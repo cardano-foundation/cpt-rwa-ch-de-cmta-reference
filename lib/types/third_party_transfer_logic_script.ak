@@ -13,10 +13,6 @@ pub type ThirdPartyDestinationAction {
 }
 
 pub type ThirdPartyTransferLogicScriptWithdrawRedeemer {
-  /// Index into `self.reference_inputs` — the CIP-113 registry node for THIS
-  /// token. See `minting_logic_script.ak` for why it is named
-  /// rather than searched for.
-  registry_node_ref_input_index: Int,
   /// WHERE GlobalState is, not just which reference input it is.
   ///
   /// This validator only READS the datum (`requires_receiver_kyc` to decide

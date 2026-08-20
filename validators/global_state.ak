@@ -11,7 +11,8 @@ use cardano/assets.{
   without_lovelace, zero,
 }
 use cardano/transaction.{
-  InlineDatum, Input, Mint, Output, OutputReference, Transaction, find_input,
+  InlineDatum, Input, Mint, NoDatum, Output, OutputReference, Transaction,
+  find_input,
 }
 use constants
 use types/global_state.{
@@ -64,6 +65,19 @@ fn is_sorted_no_dup_vkeys(
   }
 }
 
+/// Every trusted entity's metadata, individually, within
+/// `constants.max_trusted_entity_metadata_bytes` once CBOR-serialised.
+fn all_metadata_within_bound(
+  entries: Pairs<ByteArray, TrustedEntityMetadata>,
+) -> Bool {
+  list.all(
+    entries,
+    fn(entry) {
+      bytearray.length(builtin.serialise_data(entry.2nd)) <= constants.max_trusted_entity_metadata_bytes
+    },
+  )
+}
+
 fn sanitise_initial_datum(datum: GlobalStateDatum, self_mint: Value) -> Bool {
   let root_len = bytearray.length(datum.member_root_hash)
   and {
@@ -108,6 +122,12 @@ fn sanitise_initial_datum(datum: GlobalStateDatum, self_mint: Value) -> Bool {
     bytearray.length(datum.power_user_linked_list_policy_id) == 28,
     bytearray.length(datum.denylist_linked_list_policy_id) == 28,
     is_sorted_no_dup_vkeys(datum.trusted_entity_vkeys),
+    // Datum growth caps — defence in depth, see `constants.max_*` doc
+    // comment. Enforced once here at genesis, and again on every spend
+    // branch able to grow the same field afterwards.
+    list.length(datum.trusted_entity_vkeys) <= constants.max_trusted_entities,
+    bytearray.length(builtin.serialise_data(datum.security_info)) <= constants.max_security_info_bytes,
+    all_metadata_within_bound(datum.trusted_entity_vkeys),
   }
 }
 
@@ -261,6 +281,38 @@ validator global_state_spend_validator(
       security_asset_name,
     ) == 0
 
+    // Non-MintSecurity branches additionally forbid the security token from
+    // moving through the transaction at all — not merely from being minted or
+    // burned. Every validator that reads GlobalState as a SPENT input
+    // (transfer, seizure, registry upgrade, the proxy) sees the PRE-state
+    // datum, so without this guard a `can_pause` power user could
+    // pause-and-transfer, or an admin could flip a KYC flag, remove a trusted
+    // entity, change the member root, or deactivate the protocol and still
+    // move the security token in the very same transaction — under the rules
+    // that were true a moment before the action took effect. No admin action
+    // has any legitimate need to move the security token, so forbidding it
+    // here costs nothing and removes the atomicity bypass. `MintSecurity` is
+    // exempt: it is the one branch that legitimately mints, burns, and
+    // otherwise moves the token.
+    let no_security_token_movement = and {
+      list.all(
+        self.inputs,
+        fn(input) {
+          quantity_of(
+            input.output.value,
+            issuance_policy_id,
+            security_asset_name,
+          ) == 0
+        },
+      ),
+      list.all(
+        self.outputs,
+        fn(output) {
+          quantity_of(output.value, issuance_policy_id, security_asset_name) == 0
+        },
+      ),
+    }
+
     when redeemer.action is {
       MintSecurity { issuance_policy_redeemer_index } -> {
         //issuance_logic.mint validator must be called
@@ -306,6 +358,7 @@ validator global_state_spend_validator(
         )
         and {
           no_concurrent_security_mint,
+          no_security_token_movement,
           address_preserved,
           nft_preserved,
           value_preserved,
@@ -323,9 +376,12 @@ validator global_state_spend_validator(
         )
         and {
           no_concurrent_security_mint,
+          no_security_token_movement,
           address_preserved,
           nft_preserved,
           value_preserved,
+          // Datum growth cap — see `constants.max_security_info_bytes`.
+          bytearray.length(builtin.serialise_data(new_security_info)) <= constants.max_security_info_bytes,
           //Must be signed by the current admin (from input datum)
           must_be_signed_by_credential(self, input_datum.admin_credential_hash),
           builtin.equals_data(expected_output_datum, global_state_output_datum),
@@ -346,12 +402,17 @@ validator global_state_spend_validator(
         )
         and {
           no_concurrent_security_mint,
+          no_security_token_movement,
           address_preserved,
           nft_preserved,
           value_preserved,
           must_be_signed_by_credential(self, input_datum.admin_credential_hash),
           bytearray.length(vkey) == 32,
           !has_key,
+          // Datum growth caps — see `constants.max_trusted_entities` /
+          // `constants.max_trusted_entity_metadata_bytes`.
+          list.length(updated_entities) <= constants.max_trusted_entities,
+          bytearray.length(builtin.serialise_data(metadata)) <= constants.max_trusted_entity_metadata_bytes,
           builtin.equals_data(expected_output_datum, global_state_output_datum),
         }
       }
@@ -367,6 +428,7 @@ validator global_state_spend_validator(
         )
         and {
           no_concurrent_security_mint,
+          no_security_token_movement,
           address_preserved,
           nft_preserved,
           value_preserved,
@@ -404,12 +466,15 @@ validator global_state_spend_validator(
         )
         and {
           no_concurrent_security_mint,
+          no_security_token_movement,
           address_preserved,
           nft_preserved,
           value_preserved,
           old_exists,
           new_clash_ok,
           bytearray.length(new_vkey) == 32,
+          // Datum growth cap — see `constants.max_trusted_entity_metadata_bytes`.
+          bytearray.length(builtin.serialise_data(new_metadata)) <= constants.max_trusted_entity_metadata_bytes,
           must_be_signed_by_credential(self, input_datum.admin_credential_hash),
           builtin.equals_data(expected_output_datum, global_state_output_datum),
         }
@@ -421,6 +486,7 @@ validator global_state_spend_validator(
         )
         and {
           no_concurrent_security_mint,
+          no_security_token_movement,
           address_preserved,
           nft_preserved,
           value_preserved,
@@ -435,6 +501,7 @@ validator global_state_spend_validator(
         )
         and {
           no_concurrent_security_mint,
+          no_security_token_movement,
           address_preserved,
           nft_preserved,
           value_preserved,
@@ -450,6 +517,7 @@ validator global_state_spend_validator(
         let new_root_len = bytearray.length(new_member_root_hash)
         and {
           no_concurrent_security_mint,
+          no_security_token_movement,
           address_preserved,
           nft_preserved,
           value_preserved,
@@ -470,6 +538,7 @@ validator global_state_spend_validator(
         )
         and {
           no_concurrent_security_mint,
+          no_security_token_movement,
           address_preserved,
           nft_preserved,
           value_preserved,
@@ -489,6 +558,7 @@ validator global_state_spend_validator(
         )
         and {
           no_concurrent_security_mint,
+          no_security_token_movement,
           address_preserved,
           nft_preserved,
           value_preserved,
@@ -511,6 +581,7 @@ validator global_state_spend_validator(
         let expected_output_datum = set_upgrades_locked(input_fields, True)
         and {
           no_concurrent_security_mint,
+          no_security_token_movement,
           address_preserved,
           nft_preserved,
           value_preserved,
@@ -528,6 +599,7 @@ validator global_state_spend_validator(
         let expected_output_datum = set_deactivated(input_fields, True)
         and {
           no_concurrent_security_mint,
+          no_security_token_movement,
           address_preserved,
           nft_preserved,
           value_preserved,
@@ -995,6 +1067,45 @@ test deactivate_fails_when_output_not_marked_deactivated() {
   )
 }
 
+// ── DeactivateContract — no_security_token_movement ─────────────────────────
+//
+// `with_security_token_input`/`with_security_token_output` are defined below,
+// alongside the MintSecurity fixtures — Aiken resolves top-level bindings
+// module-wide, so the forward reference is fine.
+
+test deactivate_succeeds_when_security_token_absent_from_tx() {
+  // Positive control paired with the two negatives below — same fixture as
+  // `deactivate_succeeds_when_paused_and_admin_signs`, named here to make the
+  // pairing with the guard explicit.
+  let input_datum = t_datum(True, False)
+  let output_datum = GlobalStateDatum { ..input_datum, deactivated: True }
+  run_spend(
+    input_datum,
+    deactivate_redeemer(),
+    t_tx(input_datum, output_datum, [t_admin]),
+  )
+}
+
+test deactivate_rejects_when_an_input_carries_the_security_token() {
+  let input_datum = t_datum(True, False)
+  let output_datum = GlobalStateDatum { ..input_datum, deactivated: True }
+  !run_spend(
+    input_datum,
+    deactivate_redeemer(),
+    with_security_token_input(t_tx(input_datum, output_datum, [t_admin])),
+  )
+}
+
+test deactivate_rejects_when_an_output_carries_the_security_token() {
+  let input_datum = t_datum(True, False)
+  let output_datum = GlobalStateDatum { ..input_datum, deactivated: True }
+  !run_spend(
+    input_datum,
+    deactivate_redeemer(),
+    with_security_token_output(t_tx(input_datum, output_datum, [t_admin])),
+  )
+}
+
 // ── Terminal irreversibility — a deactivated GS UTxO cannot be spent at all ──
 
 test deactivated_input_rejects_further_deactivate() fail {
@@ -1048,6 +1159,67 @@ fn mintsecurity_redeemer() -> GlobalStateSpendRedeemer {
   GlobalStateSpendRedeemer {
     global_state_output_index: 0,
     action: MintSecurity { issuance_policy_redeemer_index: 0 },
+  }
+}
+
+// ── no_security_token_movement — shared fixtures ────────────────────────────
+//
+// Every non-MintSecurity branch composes `no_security_token_movement`. These
+// helpers append one extra input, or one extra output, carrying the security
+// token to an otherwise-unmodified transaction — reused by every branch's
+// guard tests below, and by the MintSecurity positive control that proves
+// the branch is deliberately exempt.
+
+const t_wallet_vkey: ByteArray =
+  #"77777777777777777777777777777777777777777777777777777777"
+
+fn t_security_token_value() -> Value {
+  merge(from_lovelace(2_000_000), from_asset(t_issuance_policy, t_sec_name, 1))
+}
+
+/// An extra input carrying one unit of the security token, parked in a plain
+/// wallet — proves `no_security_token_movement` rejects the token appearing
+/// as an INPUT, independent of which branch or datum is under test.
+fn t_security_token_input() -> Input {
+  Input {
+    output_reference: t_out_ref(9),
+    output: Output {
+      address: Address {
+        payment_credential: VerificationKey(t_wallet_vkey),
+        stake_credential: None,
+      },
+      value: t_security_token_value(),
+      datum: NoDatum,
+      reference_script: None,
+    },
+  }
+}
+
+/// Same, but as an extra OUTPUT — proves the guard also rejects the token on
+/// the output side.
+fn t_security_token_output() -> Output {
+  Output {
+    address: Address {
+      payment_credential: VerificationKey(t_wallet_vkey),
+      stake_credential: None,
+    },
+    value: t_security_token_value(),
+    datum: NoDatum,
+    reference_script: None,
+  }
+}
+
+fn with_security_token_input(tx: Transaction) -> Transaction {
+  Transaction {
+    ..tx,
+    inputs: list.concat(tx.inputs, [t_security_token_input()]),
+  }
+}
+
+fn with_security_token_output(tx: Transaction) -> Transaction {
+  Transaction {
+    ..tx,
+    outputs: list.concat(tx.outputs, [t_security_token_output()]),
   }
 }
 
@@ -1154,6 +1326,24 @@ test live_contract_still_allows_mint() {
   )
 }
 
+/// MintSecurity is deliberately EXEMPT from `no_security_token_movement` — it
+/// is the one branch that legitimately mints, burns, and otherwise moves the
+/// token. On top of the ordinary mint-delta this transaction ALSO carries an
+/// unrelated security-token input and output — exactly the shape every other
+/// branch's negative controls below reject — and the branch still succeeds.
+test mint_security_allows_security_token_input_and_output() {
+  let input_datum = t_datum(False, False)
+  let mint = 100
+  let output_datum = GlobalStateDatum {
+    ..input_datum,
+    mintable_amount: input_datum.mintable_amount - mint,
+  }
+  let tx = t_mintsecurity_tx(input_datum, output_datum, mint, [t_admin])
+    |> with_security_token_input
+    |> with_security_token_output
+  run_spend(input_datum, mintsecurity_redeemer(), tx)
+}
+
 // ── F-18: genesis KYC-config validation ─────────────────────────────────────
 
 const t_pu_ll_policy: ByteArray =
@@ -1213,6 +1403,282 @@ test sanitise_rejects_negative_network_id() {
 test sanitise_rejects_bad_root_hash_length() {
   // 2 bytes — neither empty nor 32.
   !sanitise_initial_datum(sanitise_datum(#"aabb", 1), sanitise_mint())
+}
+
+// ── Datum growth caps — genesis ─────────────────────────────────────────────
+
+/// `count` strictly-ascending 32-byte vkeys (big-endian encoding of 1..count,
+/// so ascending order is guaranteed automatically), each paired with trivial
+/// metadata — used to exercise the trusted-entity list length cap without
+/// hand-writing dozens of fixtures.
+fn t_many_entities(count: Int) -> Pairs<ByteArray, TrustedEntityMetadata> {
+  list.map(
+    list.range(1, count),
+    fn(i) { Pair(bytearray.from_int_big_endian(i, 32), builtin.i_data(i)) },
+  )
+}
+
+/// An arbitrary `Data` value (a plain byte string) whose serialised (CBOR)
+/// size, in bytes, is a function of `raw_len`. Plutus Data serialises a
+/// ByteArray longer than 64 bytes as an indefinite-length, 64-byte-chunked
+/// byte string, so the size is not simply `raw_len` plus a fixed constant.
+/// The `t_*_len_at_cap` / `t_*_len_over_cap` constants below were chosen so
+/// this lands the serialised size exactly on, or one byte over, the two
+/// size bounds this file exercises.
+fn t_data_of_raw_length(raw_len: Int) -> Data {
+  builtin.b_data(bytearray.from_int_big_endian(0, raw_len))
+}
+
+const t_security_info_len_at_cap: Int = 3969
+
+const t_security_info_len_over_cap: Int = 3970
+
+const t_metadata_len_at_cap: Int = 494
+
+const t_metadata_len_over_cap: Int = 495
+
+test sanitise_accepts_trusted_entity_count_at_the_cap() {
+  let d = GlobalStateDatum {
+    ..sanitise_datum(#"", 1),
+    trusted_entity_vkeys: t_many_entities(constants.max_trusted_entities),
+  }
+  sanitise_initial_datum(d, sanitise_mint())
+}
+
+test sanitise_rejects_trusted_entity_count_over_the_cap() {
+  let d = GlobalStateDatum {
+    ..sanitise_datum(#"", 1),
+    trusted_entity_vkeys: t_many_entities(constants.max_trusted_entities + 1),
+  }
+  !sanitise_initial_datum(d, sanitise_mint())
+}
+
+test sanitise_accepts_security_info_at_the_size_cap() {
+  let d = GlobalStateDatum {
+    ..sanitise_datum(#"", 1),
+    security_info: t_data_of_raw_length(t_security_info_len_at_cap),
+  }
+  sanitise_initial_datum(d, sanitise_mint())
+}
+
+test sanitise_rejects_security_info_one_byte_over_the_size_cap() {
+  let d = GlobalStateDatum {
+    ..sanitise_datum(#"", 1),
+    security_info: t_data_of_raw_length(t_security_info_len_over_cap),
+  }
+  !sanitise_initial_datum(d, sanitise_mint())
+}
+
+test sanitise_accepts_trusted_entity_metadata_at_the_size_cap() {
+  let d = GlobalStateDatum {
+    ..sanitise_datum(#"", 1),
+    trusted_entity_vkeys: [
+      Pair(t_vkey_10, t_data_of_raw_length(t_metadata_len_at_cap)),
+    ],
+  }
+  sanitise_initial_datum(d, sanitise_mint())
+}
+
+test sanitise_rejects_trusted_entity_metadata_one_byte_over_the_size_cap() {
+  let d = GlobalStateDatum {
+    ..sanitise_datum(#"", 1),
+    trusted_entity_vkeys: [
+      Pair(t_vkey_10, t_data_of_raw_length(t_metadata_len_over_cap)),
+    ],
+  }
+  !sanitise_initial_datum(d, sanitise_mint())
+}
+
+// ── Genesis sanitisation negatives ──────────────────────────────────────────
+
+test sanitise_rejects_negative_mintable_amount() {
+  let d = GlobalStateDatum { ..sanitise_datum(#"", 1), mintable_amount: -1 }
+  !sanitise_initial_datum(d, sanitise_mint())
+}
+
+test sanitise_rejects_short_admin_credential_hash() {
+  let d = GlobalStateDatum {
+    ..sanitise_datum(#"", 1),
+    admin_credential_hash: #"ab",
+  }
+  !sanitise_initial_datum(d, sanitise_mint())
+}
+
+test sanitise_rejects_short_minting_script_credential_hash() {
+  let d = GlobalStateDatum {
+    ..sanitise_datum(#"", 1),
+    minting_script_credential_hash: #"ab",
+  }
+  !sanitise_initial_datum(d, sanitise_mint())
+}
+
+test sanitise_rejects_born_paused() {
+  let d = GlobalStateDatum { ..sanitise_datum(#"", 1), transfers_paused: True }
+  !sanitise_initial_datum(d, sanitise_mint())
+}
+
+test sanitise_rejects_born_deactivated() {
+  let d = GlobalStateDatum { ..sanitise_datum(#"", 1), deactivated: True }
+  !sanitise_initial_datum(d, sanitise_mint())
+}
+
+// ── Genesis mint validator ───────────────────────────────────────────────────
+
+const t_mint_tx0: ByteArray =
+  #"9999999999999999999999999999999999999999999999999999999999999999"
+
+const t_mint_index0: Int = 0
+
+const t_mint_receiver_vkey: ByteArray =
+  #"88888888888888888888888888888888888888888888888888888888"
+
+/// Invokes `global_state_mint_validator.mint` end-to-end, fixing the
+/// compile-time one-shot UTxO reference (`t_mint_tx0`/`t_mint_index0`) and
+/// the (unused) redeemer so each test only has to vary `policy_id` and `self`.
+fn run_mint(policy_id: PolicyId, self: Transaction) -> Bool {
+  global_state_mint_validator.mint(
+    t_mint_tx0,
+    t_mint_index0,
+    builtin.constr_data(0, []),
+    policy_id,
+    self,
+  )
+}
+
+/// The one-shot nonce UTxO the mint validator requires as an input.
+fn t_nonce_input() -> Input {
+  Input {
+    output_reference: OutputReference {
+      transaction_id: t_mint_tx0,
+      output_index: t_mint_index0,
+    },
+    output: Output {
+      address: Address {
+        payment_credential: VerificationKey(t_mint_receiver_vkey),
+        stake_credential: None,
+      },
+      value: from_lovelace(2_000_000),
+      datum: NoDatum,
+      reference_script: None,
+    },
+  }
+}
+
+/// The output carrying the freshly-minted global_state NFT plus a datum.
+fn t_mint_output(datum: GlobalStateDatum) -> Output {
+  Output {
+    address: Address {
+      payment_credential: Script(t_gs_script_hash),
+      stake_credential: None,
+    },
+    value: merge(
+      from_lovelace(2_000_000),
+      from_asset(t_gs_policy, constants.global_state_asset_name, 1),
+    ),
+    datum: InlineDatum(datum),
+    reference_script: None,
+  }
+}
+
+/// A plain output carrying no asset of `t_gs_policy` at all.
+fn t_mint_plain_output() -> Output {
+  Output {
+    address: Address {
+      payment_credential: VerificationKey(t_mint_receiver_vkey),
+      stake_credential: None,
+    },
+    value: from_lovelace(2_000_000),
+    datum: NoDatum,
+    reference_script: None,
+  }
+}
+
+fn t_mint_tx(
+  inputs: List<Input>,
+  outputs: List<Output>,
+  mint: Value,
+) -> Transaction {
+  Transaction {
+    ..t_tx(sanitise_datum(#"", 1), sanitise_datum(#"", 1), []),
+    inputs,
+    outputs,
+    mint,
+  }
+}
+
+test global_state_mint_succeeds_with_nonce_and_sanitised_datum() {
+  let datum = sanitise_datum(#"", 1)
+  let mint = merge(
+    from_asset(t_gs_policy, constants.global_state_asset_name, 1),
+    sanitise_mint(),
+  )
+  run_mint(
+    t_gs_policy,
+    t_mint_tx([t_nonce_input()], [t_mint_output(datum)], mint),
+  )
+}
+
+test global_state_mint_fails_without_nonce_input() fail {
+  // The one-time UTxO `find_input` must locate is absent from `self.inputs`
+  // — `expect Some(_input_present) = find_input(..)` traps.
+  let datum = sanitise_datum(#"", 1)
+  let mint = merge(
+    from_asset(t_gs_policy, constants.global_state_asset_name, 1),
+    sanitise_mint(),
+  )
+  run_mint(t_gs_policy, t_mint_tx([], [t_mint_output(datum)], mint))
+}
+
+test global_state_mint_rejects_second_asset_name_under_policy() {
+  // A second asset name minted under the same policy, carried by a SEPARATE
+  // output — the primary NFT output is untouched, so `list.expect_find`
+  // still locates it without trapping; `quantity_of_policy_id(self.mint,
+  // policy_id) == 1` is the only assertion this violates.
+  let datum = sanitise_datum(#"", 1)
+  let mint = merge(
+    merge(
+      from_asset(t_gs_policy, constants.global_state_asset_name, 1),
+      from_asset(t_gs_policy, "Other", 1),
+    ),
+    sanitise_mint(),
+  )
+  !run_mint(
+    t_gs_policy,
+    t_mint_tx(
+      [t_nonce_input()],
+      [t_mint_output(datum), t_mint_plain_output()],
+      mint,
+    ),
+  )
+}
+
+test global_state_mint_rejects_nft_quantity_of_two() {
+  // The NFT-carrying output still holds exactly 1 unit (so `list.expect_find`
+  // does not trap), but `self.mint` carries 2 units of the same asset name —
+  // `quantity_of(self.mint, policy_id, asset_name) == 1` is the check this
+  // violates.
+  let datum = sanitise_datum(#"", 1)
+  let mint = merge(
+    from_asset(t_gs_policy, constants.global_state_asset_name, 2),
+    sanitise_mint(),
+  )
+  !run_mint(
+    t_gs_policy,
+    t_mint_tx([t_nonce_input()], [t_mint_output(datum)], mint),
+  )
+}
+
+test global_state_mint_fails_when_no_output_carries_the_nft() fail {
+  // No output in the transaction carries the NFT at all — `list.expect_find`
+  // recurses past the end of `self.outputs` and traps.
+  let mint = merge(
+    from_asset(t_gs_policy, constants.global_state_asset_name, 1),
+    sanitise_mint(),
+  )
+  run_mint(
+    t_gs_policy,
+    t_mint_tx([t_nonce_input()], [t_mint_plain_output()], mint),
+  )
 }
 
 // ── PauseTransfers — the power-user gate and its list-address pin ───────────
@@ -1324,6 +1790,38 @@ test pause_fails_when_the_power_user_node_is_in_a_wallet() fail {
           #"0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e",
         ),
       ),
+    ),
+  )
+}
+
+// ── PauseTransfers — no_security_token_movement ─────────────────────────────
+
+test pause_succeeds_when_security_token_absent_from_tx() {
+  // Positive control paired with the two negatives below — same fixture as
+  // `pause_succeeds_for_a_can_pause_power_user_in_the_list`.
+  run_spend(
+    t_pause_datum(False),
+    t_pause_redeemer(),
+    t_pause_tx(t_pu_node_at(Script(t_pu_script_hash))),
+  )
+}
+
+test pause_rejects_when_an_input_carries_the_security_token() {
+  !run_spend(
+    t_pause_datum(False),
+    t_pause_redeemer(),
+    with_security_token_input(
+      t_pause_tx(t_pu_node_at(Script(t_pu_script_hash))),
+    ),
+  )
+}
+
+test pause_rejects_when_an_output_carries_the_security_token() {
+  !run_spend(
+    t_pause_datum(False),
+    t_pause_redeemer(),
+    with_security_token_output(
+      t_pause_tx(t_pu_node_at(Script(t_pu_script_hash))),
     ),
   )
 }
@@ -1470,6 +1968,30 @@ test modify_security_info_accepts_an_arbitrary_data_shape() {
   )
 }
 
+// ── ModifySecurityInfo — datum growth cap ───────────────────────────────────
+
+test modify_security_info_succeeds_at_the_size_cap() {
+  let input_datum = t_datum(False, False)
+  let new_info = t_data_of_raw_length(t_security_info_len_at_cap)
+  let output_datum = GlobalStateDatum { ..input_datum, security_info: new_info }
+  run_spend(
+    input_datum,
+    modify_security_info_redeemer(new_info),
+    t_tx(input_datum, output_datum, [t_admin]),
+  )
+}
+
+test modify_security_info_rejects_one_byte_over_the_size_cap() {
+  let input_datum = t_datum(False, False)
+  let new_info = t_data_of_raw_length(t_security_info_len_over_cap)
+  let output_datum = GlobalStateDatum { ..input_datum, security_info: new_info }
+  !run_spend(
+    input_datum,
+    modify_security_info_redeemer(new_info),
+    t_tx(input_datum, output_datum, [t_admin]),
+  )
+}
+
 // ── AddTrustedEntity — 32-byte vkey, no duplicate, sorted insertion ────────
 
 fn add_trusted_entity_redeemer(
@@ -1601,6 +2123,101 @@ test add_trusted_entity_inserts_smaller_vkey_in_sorted_order() {
   )
 }
 
+// ── AddTrustedEntity — datum growth caps ────────────────────────────────────
+
+fn t_full_tel_datum(count: Int) -> GlobalStateDatum {
+  GlobalStateDatum {
+    ..t_datum(False, False),
+    trusted_entity_vkeys: t_many_entities(count),
+  }
+}
+
+test add_trusted_entity_succeeds_when_resulting_length_is_at_the_cap() {
+  let input_datum = t_full_tel_datum(constants.max_trusted_entities - 1)
+  let new_vkey = bytearray.from_int_big_endian(
+    constants.max_trusted_entities,
+    32,
+  )
+  let updated_entities = pairs.insert_by_ascending_key(
+    input_datum.trusted_entity_vkeys,
+    new_vkey,
+    builtin.i_data(0),
+    bytearray.compare,
+  )
+  let output_datum = GlobalStateDatum {
+    ..input_datum,
+    trusted_entity_vkeys: updated_entities,
+  }
+  run_spend(
+    input_datum,
+    add_trusted_entity_redeemer(new_vkey, builtin.i_data(0)),
+    t_tx(input_datum, output_datum, [t_admin]),
+  )
+}
+
+test add_trusted_entity_rejects_when_resulting_length_exceeds_the_cap() {
+  let input_datum = t_full_tel_datum(constants.max_trusted_entities)
+  let new_vkey = bytearray.from_int_big_endian(
+    constants.max_trusted_entities + 1,
+    32,
+  )
+  let updated_entities = pairs.insert_by_ascending_key(
+    input_datum.trusted_entity_vkeys,
+    new_vkey,
+    builtin.i_data(0),
+    bytearray.compare,
+  )
+  let output_datum = GlobalStateDatum {
+    ..input_datum,
+    trusted_entity_vkeys: updated_entities,
+  }
+  !run_spend(
+    input_datum,
+    add_trusted_entity_redeemer(new_vkey, builtin.i_data(0)),
+    t_tx(input_datum, output_datum, [t_admin]),
+  )
+}
+
+test add_trusted_entity_succeeds_when_metadata_is_at_the_size_cap() {
+  let input_datum = t_tel_datum()
+  let metadata = t_data_of_raw_length(t_metadata_len_at_cap)
+  let updated_entities = pairs.insert_by_ascending_key(
+    input_datum.trusted_entity_vkeys,
+    t_vkey_20,
+    metadata,
+    bytearray.compare,
+  )
+  let output_datum = GlobalStateDatum {
+    ..input_datum,
+    trusted_entity_vkeys: updated_entities,
+  }
+  run_spend(
+    input_datum,
+    add_trusted_entity_redeemer(t_vkey_20, metadata),
+    t_tx(input_datum, output_datum, [t_admin]),
+  )
+}
+
+test add_trusted_entity_rejects_metadata_one_byte_over_the_size_cap() {
+  let input_datum = t_tel_datum()
+  let metadata = t_data_of_raw_length(t_metadata_len_over_cap)
+  let updated_entities = pairs.insert_by_ascending_key(
+    input_datum.trusted_entity_vkeys,
+    t_vkey_20,
+    metadata,
+    bytearray.compare,
+  )
+  let output_datum = GlobalStateDatum {
+    ..input_datum,
+    trusted_entity_vkeys: updated_entities,
+  }
+  !run_spend(
+    input_datum,
+    add_trusted_entity_redeemer(t_vkey_20, metadata),
+    t_tx(input_datum, output_datum, [t_admin]),
+  )
+}
+
 // ── RemoveTrustedEntity — vkey must be present ──────────────────────────────
 
 fn remove_trusted_entity_redeemer(vkey: ByteArray) -> GlobalStateSpendRedeemer {
@@ -1664,6 +2281,47 @@ test remove_trusted_entity_cannot_smuggle_another_field_change() {
     input_datum,
     remove_trusted_entity_redeemer(t_vkey_10),
     t_tx(input_datum, output_datum, [t_admin]),
+  )
+}
+
+// ── RemoveTrustedEntity — no_security_token_movement ────────────────────────
+
+test remove_trusted_entity_succeeds_when_security_token_absent_from_tx() {
+  let input_datum = t_tel_datum()
+  let output_datum = GlobalStateDatum {
+    ..input_datum,
+    trusted_entity_vkeys: [Pair(t_vkey_30, builtin.i_data(3))],
+  }
+  run_spend(
+    input_datum,
+    remove_trusted_entity_redeemer(t_vkey_10),
+    t_tx(input_datum, output_datum, [t_admin]),
+  )
+}
+
+test remove_trusted_entity_rejects_when_an_input_carries_the_security_token() {
+  let input_datum = t_tel_datum()
+  let output_datum = GlobalStateDatum {
+    ..input_datum,
+    trusted_entity_vkeys: [Pair(t_vkey_30, builtin.i_data(3))],
+  }
+  !run_spend(
+    input_datum,
+    remove_trusted_entity_redeemer(t_vkey_10),
+    with_security_token_input(t_tx(input_datum, output_datum, [t_admin])),
+  )
+}
+
+test remove_trusted_entity_rejects_when_an_output_carries_the_security_token() {
+  let input_datum = t_tel_datum()
+  let output_datum = GlobalStateDatum {
+    ..input_datum,
+    trusted_entity_vkeys: [Pair(t_vkey_30, builtin.i_data(3))],
+  }
+  !run_spend(
+    input_datum,
+    remove_trusted_entity_redeemer(t_vkey_10),
+    with_security_token_output(t_tx(input_datum, output_datum, [t_admin])),
   )
 }
 
@@ -1812,6 +2470,42 @@ test update_trusted_entity_cannot_smuggle_another_field_change() {
   )
 }
 
+// ── UpdateTrustedEntity — datum growth cap ──────────────────────────────────
+
+test update_trusted_entity_succeeds_when_new_metadata_is_at_the_size_cap() {
+  let input_datum = t_tel_datum()
+  let new_metadata = t_data_of_raw_length(t_metadata_len_at_cap)
+  let output_datum = GlobalStateDatum {
+    ..input_datum,
+    trusted_entity_vkeys: [
+      Pair(t_vkey_20, new_metadata),
+      Pair(t_vkey_30, builtin.i_data(3)),
+    ],
+  }
+  run_spend(
+    input_datum,
+    update_trusted_entity_redeemer(t_vkey_10, t_vkey_20, new_metadata),
+    t_tx(input_datum, output_datum, [t_admin]),
+  )
+}
+
+test update_trusted_entity_rejects_new_metadata_one_byte_over_the_size_cap() {
+  let input_datum = t_tel_datum()
+  let new_metadata = t_data_of_raw_length(t_metadata_len_over_cap)
+  let output_datum = GlobalStateDatum {
+    ..input_datum,
+    trusted_entity_vkeys: [
+      Pair(t_vkey_20, new_metadata),
+      Pair(t_vkey_30, builtin.i_data(3)),
+    ],
+  }
+  !run_spend(
+    input_datum,
+    update_trusted_entity_redeemer(t_vkey_10, t_vkey_20, new_metadata),
+    t_tx(input_datum, output_datum, [t_admin]),
+  )
+}
+
 // ── SetRequiresSenderKyc — admin-only; guards against writing the sibling flag ──
 
 fn set_requires_sender_kyc_redeemer(enabled: Bool) -> GlobalStateSpendRedeemer {
@@ -1875,6 +2569,47 @@ test set_requires_sender_kyc_cannot_smuggle_another_field_change() {
     input_datum,
     set_requires_sender_kyc_redeemer(True),
     t_tx(input_datum, output_datum, [t_admin]),
+  )
+}
+
+// ── SetRequiresSenderKyc — no_security_token_movement ───────────────────────
+
+test set_requires_sender_kyc_succeeds_when_security_token_absent_from_tx() {
+  let input_datum = t_datum(False, False)
+  let output_datum = GlobalStateDatum {
+    ..input_datum,
+    requires_sender_kyc: True,
+  }
+  run_spend(
+    input_datum,
+    set_requires_sender_kyc_redeemer(True),
+    t_tx(input_datum, output_datum, [t_admin]),
+  )
+}
+
+test set_requires_sender_kyc_rejects_when_an_input_carries_the_security_token() {
+  let input_datum = t_datum(False, False)
+  let output_datum = GlobalStateDatum {
+    ..input_datum,
+    requires_sender_kyc: True,
+  }
+  !run_spend(
+    input_datum,
+    set_requires_sender_kyc_redeemer(True),
+    with_security_token_input(t_tx(input_datum, output_datum, [t_admin])),
+  )
+}
+
+test set_requires_sender_kyc_rejects_when_an_output_carries_the_security_token() {
+  let input_datum = t_datum(False, False)
+  let output_datum = GlobalStateDatum {
+    ..input_datum,
+    requires_sender_kyc: True,
+  }
+  !run_spend(
+    input_datum,
+    set_requires_sender_kyc_redeemer(True),
+    with_security_token_output(t_tx(input_datum, output_datum, [t_admin])),
   )
 }
 
@@ -2024,5 +2759,46 @@ test update_member_root_hash_accepts_clearing_back_to_empty() {
     input_datum,
     update_member_root_hash_redeemer(#""),
     t_tx(input_datum, output_datum, [t_admin]),
+  )
+}
+
+// ── UpdateMemberRootHash — no_security_token_movement ───────────────────────
+
+test update_member_root_hash_succeeds_when_security_token_absent_from_tx() {
+  let input_datum = t_datum(False, False)
+  let output_datum = GlobalStateDatum {
+    ..input_datum,
+    member_root_hash: t_root32,
+  }
+  run_spend(
+    input_datum,
+    update_member_root_hash_redeemer(t_root32),
+    t_tx(input_datum, output_datum, [t_admin]),
+  )
+}
+
+test update_member_root_hash_rejects_when_an_input_carries_the_security_token() {
+  let input_datum = t_datum(False, False)
+  let output_datum = GlobalStateDatum {
+    ..input_datum,
+    member_root_hash: t_root32,
+  }
+  !run_spend(
+    input_datum,
+    update_member_root_hash_redeemer(t_root32),
+    with_security_token_input(t_tx(input_datum, output_datum, [t_admin])),
+  )
+}
+
+test update_member_root_hash_rejects_when_an_output_carries_the_security_token() {
+  let input_datum = t_datum(False, False)
+  let output_datum = GlobalStateDatum {
+    ..input_datum,
+    member_root_hash: t_root32,
+  }
+  !run_spend(
+    input_datum,
+    update_member_root_hash_redeemer(t_root32),
+    with_security_token_output(t_tx(input_datum, output_datum, [t_admin])),
   )
 }
