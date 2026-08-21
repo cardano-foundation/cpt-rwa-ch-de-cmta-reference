@@ -289,6 +289,8 @@ validator minting_authority_validator(
               self,
               issuance_policy_id,
               reference_asset_name,
+              security_asset_name,
+              admin_credential_hash,
             )?
           } else {
             True
@@ -426,16 +428,6 @@ validator minting_authority_validator(
           global_state_policy_id,
         )
         and {
-          // Belt-and-braces over `registry_spend`'s own
-          // `!mint_has_policy(self.mint, spent_node.key)`: an upgrade changes
-          // rules, never supply. Re-checked here because that guarantee comes
-          // from an external script this repo neither vendors nor pins.
-          //
-          // Checked as a SHAPE, not a sum — see `only_permitted_assets_minted`.
-          // `quantity_of_policy_id(..) == 0` sums quantities, and the mint
-          // field may hold NEGATIVE ones, so +N of one asset name netted
-          // against -N of another under the same policy would satisfy it.
-          dict.is_empty(assets.tokens(self.mint, issuance_policy_id))?,
           // INVARIANT 4.
           !gs_datum.deactivated,
           // The one-way lock closes this path permanently.
@@ -531,26 +523,39 @@ fn only_permitted_assets_minted(
   )
 }
 
-/// Pin where the CIP-68 reference NFT lands, and that there is exactly one of
-/// it.
+/// THE CIP-68 REFERENCE NFT CUSTODY DECISION.
 ///
-/// The reference NFT is exempt from the supply cap and from the denylist and
-/// KYC gates — it carries metadata, not value. That exemption is only safe
-/// while the token cannot become a second supply, which needs three things:
-/// the allowlist above caps it at quantity 1, this function requires exactly
-/// one output to carry it, and only `RegisterMint` may mint it at all — and
-/// registration is structurally a once-only event, so the reference NFT can be
-/// created exactly once in this deployment's lifetime.
+/// The reference NFT is metadata, not value — it is exempt from the supply
+/// cap and from the denylist and KYC gates. It is minted exactly once, here,
+/// at registration (only `RegisterMint` may mint it, and registration is
+/// structurally a once-only event), and this function requires it to be
+/// ALONE in its own UTxO — quantity 1, no other asset of this policy
+/// co-located with it — at genesis. Its owner — the inline stake credential
+/// of that output — must be the GlobalState ADMIN credential, so the admin is
+/// the CIP-68 metadata authority by construction: updating the metadata is
+/// the admin spending this UTxO (base-layer owner consent) and re-outputting
+/// the NFT with the new datum. After `RotateAdmin` the outgoing admin hands
+/// the NFT to the new admin with an ordinary owner transfer (README).
 ///
-/// The base layer's `no_escape` already forbids any token of this policy at
-/// a non-programmable-base output, so only the quantity and the inline stake
-/// credential are checked here. The stake credential is what gives the NFT a
-/// defined owner, which is who may later spend it to update the metadata
-/// datum.
+/// Every compliance scan in this substandard (denylist, KYC, seizure) is
+/// scoped to `security_asset_name` and never inspects the reference NFT, so
+/// its LATER movement is governed by the base layer's owner-consent check
+/// alone — nothing here re-vets a metadata update. Keeping it alone and at an
+/// issuer-controlled credential is therefore an OPERATIONAL rule (documented
+/// in the README), not a hot-path check: a per-transfer check guarding a
+/// once-in-a-lifetime asset is not worth its cost.
+///
+/// The base layer's `no_escape` already confines every token of this policy —
+/// the reference NFT included — to the programmable base, so the
+/// programmable-base payment-credential pin stays OUT of this function; only
+/// the quantity, the co-location and the owner (inline stake credential ==
+/// admin) are checked here. The datum itself is not inspected.
 fn reference_nft_output_is_pinned(
   self: Transaction,
   issuance_policy_id: ByteArray,
   reference_asset_name: ByteArray,
+  security_asset_name: ByteArray,
+  admin_credential_hash: ByteArray,
 ) -> Bool {
   let carriers = list.filter(
     self.outputs,
@@ -560,8 +565,17 @@ fn reference_nft_output_is_pinned(
   )
   when carriers is {
     [output] -> {
-      expect Some(Inline(_owner)) = output.address.stake_credential
-      quantity_of(output.value, issuance_policy_id, reference_asset_name) == 1
+      expect Some(Inline(owner)) = output.address.stake_credential
+      and {
+        quantity_of(output.value, issuance_policy_id, reference_asset_name) == 1,
+        // The admin is the CIP-68 metadata authority: the NFT's owner (its
+        // inline stake credential, key or script) must be the GlobalState
+        // admin credential at registration.
+        utils.credential_hash(owner) == admin_credential_hash,
+        // Genesis-only: the reference NFT starts life alone in its own
+        // UTxO, never co-located with the first supply.
+        quantity_of(output.value, issuance_policy_id, security_asset_name) == 0,
+      }
     }
     _ -> False
   }
@@ -1970,11 +1984,13 @@ fn register_structural_redeemer() -> MintingAuthorityWithdrawRedeemer {
 // these tests pin all three.
 
 /// A reference-NFT output: at the programmable base, with an owner.
+/// Owned by the GlobalState admin (`test_admin_hash`), as
+/// `reference_nft_output_is_pinned` requires.
 fn make_reference_nft_output() -> Output {
   Output {
     address: Address {
       payment_credential: Script(test_plb_hash),
-      stake_credential: Some(Inline(VerificationKey(test_dest_stake_hash))),
+      stake_credential: Some(Inline(VerificationKey(test_admin_hash))),
     },
     value: merge(
       from_lovelace(2_000_000),
@@ -2072,6 +2088,72 @@ test register_mint_rejects_a_reference_quantity_above_one() {
           from_lovelace(2_000_000),
           from_asset(test_issuance_policy_id, test_reference_asset_name, 2),
         ),
+      },
+    ),
+  )
+}
+
+/// NEGATIVE TWIN of `register_mint_may_also_mint_the_cip68_reference_nft`.
+/// THE CIP-68 CUSTODY DECISION: the reference NFT must start life ALONE in
+/// its own UTxO. Here it shares ONE output with the first supply instead —
+/// `co_located_dest` carries both `test_reference_asset_name` and 1_000 of
+/// `test_security_asset_name` — which `reference_nft_output_is_pinned`'s new
+/// genesis-only conjunct (`quantity_of(.., security_asset_name) == 0`)
+/// exists to catch.
+///
+/// Rejection is a clean `False`, not a trap: `reference_nft_output_is_pinned`
+/// returns a `Bool` through `?` (trace-on-false, not `expect`) into the
+/// `RegisterMint` branch's `and { }`, so a failing conjunct there just makes
+/// the whole branch — and `withdraw` — return `False`. Hence `!run_withdraw`,
+/// not `fail`.
+test register_mint_rejects_a_reference_nft_co_located_with_supply() {
+  let amount = 1_000
+  let base = make_register_mint_tx(
+    amount,
+    True,
+    make_registry_ref_input().output,
+    [test_pu_credential_hash],
+  )
+  let co_located_dest = Output {
+    ..make_dest_output(amount),
+    value: merge(
+      make_dest_output(amount).value,
+      from_asset(test_issuance_policy_id, test_reference_asset_name, 1),
+    ),
+  }
+  !run_withdraw(
+    register_mint_redeemer(amount),
+    Transaction {
+      ..base,
+      // Same node at index 0 (what `register_mint_redeemer` names); the
+      // supply output at index 1 now also carries the reference NFT, in
+      // place of the reference NFT's own output.
+      outputs: [make_registry_ref_input().output, co_located_dest],
+      mint: merge(
+        base.mint,
+        from_asset(test_issuance_policy_id, test_reference_asset_name, 1),
+      ),
+    },
+  )
+}
+
+/// NEGATIVE TWIN of `register_mint_may_also_mint_the_cip68_reference_nft`:
+/// the reference-NFT output differs from the positive control in exactly its
+/// inline stake credential — a non-admin key (`test_dest_stake_hash`) instead
+/// of the GlobalState admin. `reference_nft_output_is_pinned`'s owner conjunct
+/// is a plain `Bool` through `?`, so the rejection is a clean `False` — hence
+/// `!run_withdraw`, not `fail`.
+test register_mint_rejects_a_reference_nft_not_owned_by_the_admin() {
+  !run_withdraw(
+    register_mint_redeemer(1_000),
+    register_mint_with_reference_tx(
+      1,
+      Output {
+        ..make_reference_nft_output(),
+        address: Address {
+          payment_credential: Script(test_plb_hash),
+          stake_credential: Some(Inline(VerificationKey(test_dest_stake_hash))),
+        },
       },
     ),
   )
@@ -2621,25 +2703,11 @@ test upgrade_cannot_repoint_third_party_logic_to_a_non_script() fail {
 // layer (CIP-113's `registry_spend` already threads `next` unchanged through
 // an in-place field update).
 
-test upgrade_cannot_change_supply() fail {
-  // An upgrade changes rules, never supply.
-  let base = make_upgrade_tx(
-    make_upgraded_node_output(
-      Script(test_new_transfer_logic_hash),
-      VerificationKey(#""),
-      test_gs_policy_id,
-    ),
-    make_gs_ref_input(),
-    [test_admin_hash],
-  )
-  run_withdraw(
-    upgrade_redeemer(),
-    Transaction {
-      ..base,
-      mint: from_asset(test_issuance_policy_id, test_security_asset_name, 1_000),
-    },
-  )
-}
+// `upgrade_cannot_change_supply` test removed: its subject — the belt-and-
+// braces `dict.is_empty(assets.tokens(self.mint, issuance_policy_id))?`
+// conjunct — no longer exists. The base layer's `registry_spend` already
+// forbids minting or burning the spent node's own token in the same
+// transaction, relied upon instead.
 
 test upgrade_fails_when_spent_node_is_another_tokens() fail {
   // Purpose-binding: only THIS token's node (the one naming our proxy) may

@@ -155,11 +155,16 @@ the equivalent in your off-chain library) before deriving any hash or address.
 
 ### Prerequisites
 
-Two values come from the deployed CIP-113 base layer of the target network, not from this repo —
-obtain them before applying any parameters:
+One value comes from the deployed CIP-113 base layer of the target network, not from this repo —
+obtain it before applying any parameters:
 
 * **`registry_policy_id`** — the CIP-113 registry mint policy id.
-* **`plb_script_hash`** — the CIP-113 programmable-logic-base (PLB) script hash.
+
+**`plb_script_hash`** — the CIP-113 programmable-logic-base (PLB) script hash — is **off-chain
+only**: the address of every programmable-token UTxO. No validator in this repo takes it as a
+compile-time parameter any more; the base layer's own custody guarantees cover mint, ordinary
+transfer and seizure alike (see
+[What is delegated to the CIP-113 base layer](#what-is-delegated-to-the-cip-113-base-layer)).
 
 ### Parameter order
 
@@ -184,7 +189,7 @@ exact order the blueprint (`plutus.json`) declares them; apply top to bottom.
 | 6 | `minting_logic_script.minting_logic_validator` | `global_state_policy_id` | Row 1. Its only parameter. |
 | 7 | `global_state.global_state_spend_validator` (spend) | `security_asset_name`, `issuance_policy_id`, `global_state_policy_id`, `power_user_list_script_hash` | Operator choice; the hash of `minting_logic_validator` (row 6) — the **issuance policy ID**, i.e. the security token's policy ID; row 1; the hash of `power_users_validator` (row 3). |
 | 8 | `transfer_logic_script.transfer_logic_validator` | `security_asset_name`, `global_state_policy_id`, `expected_issuance_policy_id`, `denylist_script_hash` | Operator choice; row 1; the hash of `minting_logic_validator` (row 6); the hash of `denylist_validator` (row 5). |
-| 9 | `third_party_transfer_logic_script.third_party_transfer_logic_validator` | `security_asset_name`, `global_state_policy_id`, `expected_issuance_policy_id`, `denylist_script_hash`, `power_user_list_script_hash`, `plb_script_hash` | Operator choice; row 1; row 6's hash; row 5's hash; row 3's hash; Prerequisites. (The power-users policy id is read from the GlobalState datum at run time, not compiled in.) |
+| 9 | `third_party_transfer_logic_script.third_party_transfer_logic_validator` | `security_asset_name`, `global_state_policy_id`, `expected_issuance_policy_id`, `denylist_script_hash`, `power_user_list_script_hash` | Operator choice; row 1; row 6's hash; row 5's hash; row 3's hash. (The power-users policy id is read from the GlobalState datum at run time, not compiled in.) |
 | 10 | `minting_authority.minting_authority_validator` | `security_asset_name`, `global_state_policy_id`, `registry_policy_id`, `power_users_linked_list_policy_id`, `minting_logic_script_credential_hash`, `expected_issuance_policy_id`, `denylist_script_hash`, `power_user_list_script_hash`, `reference_asset_name` | Operator choice; row 1; Prerequisites; row 2's hash; row 6's hash; row 6's hash again (**must be identical to the previous value** — see below); row 5's hash; row 3's hash; operator choice (see below). |
 
 ### What the derived parameters must equal
@@ -244,24 +249,59 @@ independently. In plain terms, the base layer guarantees:
 * **Custody on ordinary transfer.** The transfer path requires programmable-base outputs to hold, per
   policy, at least as much as programmable-base inputs (`tokens.contains(PLB outputs, PLB inputs)`),
   which — combined with ledger value conservation — keeps the token inside the base.
+* **Custody on seizure (forced transfer).** `validate_io_constraints_and_balance` (`third_party.ak`)
+  requires every spent programmable-base input to be paired with an output at the identical address,
+  datum and reference script, and requires the acted-on policy's tokens across **all**
+  programmable-base outputs to be a superset of those across programmable-base inputs plus mint/burn
+  — the same custody guarantee as mint and ordinary transfer, independently verified for the seizure
+  path.
 * **Registry integrity.** A registry node's key is cryptographically bound to its
   `minting_logic_script` field, and on an in-place upgrade the base layer itself keeps `key`, `next`
   and `minting_logic_script` frozen.
+* **No supply change on an upgrade.** `registry_spend` hoists
+  `!mint_has_policy(self.mint, spent_node.key)` above its `when`, so it covers both the in-place
+  update and the covering-node spend: a transaction that spends a registry node can never mint or
+  burn that node's own token. An upgrade can change transfer-logic rules; it can never touch supply.
 * **Which registry node gets to invoke a logic script.** The base layer authenticates the registry
   node it uses to dispatch to a logic script's withdraw-0.
 
-Because of the last point, this deployment's transfer, seizure and mint/burn logic no longer read or
-re-derive a registry node at all on those paths — the issuance policy each one polices is pinned at
-compile time instead. And because of the first two points, the mint and ordinary-transfer paths no
-longer re-check programmable-base custody themselves; they rely on the base layer's own guarantees.
-
-**One path is the exception.** The seizure (forced-transfer) path still pins every destination's
-payment credential to the programmable-base script hash, because — unlike the two custody guarantees
-above — that guarantee was not independently verified against the base layer.
+Because of the registry-dispatch point, this deployment's transfer, seizure and mint/burn logic no
+longer read or re-derive a registry node at all on those paths — the issuance policy each one polices
+is pinned at compile time instead. Because of the three custody points, none of the mint,
+ordinary-transfer or seizure paths re-check programmable-base custody themselves any more; all three
+rely on the base layer's own guarantees. And because of the no-supply-change point, the upgrade path
+no longer re-checks that a spend-and-update transaction mints or burns nothing; it relies on
+`registry_spend` alone.
 
 These guarantees were verified against CIP-113 base-layer commit `018415d`. Upgrading the deployed
 base layer invalidates that verification and requires re-checking it before relying on this section
 again.
+
+### CIP-68 reference NFT custody
+
+The CIP-68 reference NFT is holding metadata, not value. It is minted exactly once, at registration, and
+must start life **alone** in its own UTxO — no other asset of the issuance policy (including the
+first supply) co-located with it, and carrying its own min-ADA. Its owner — the inline stake
+credential of that output — **must be the GlobalState admin credential** at registration
+(`reference_nft_output_is_pinned` enforces it), so the admin is the CIP-68 metadata authority by
+construction. A metadata update is the admin spending that UTxO — an ordinary CIP-113 owner-consent
+transfer to the same address — and re-outputting the NFT with the new inline datum
+(`Constr 0 [metadata map, version, extra]`, per CIP-68); the datum content is not inspected on-chain.
+Because every compliance scan in this substandard (denylist, KYC, seizure) is scoped to
+`security_asset_name`, the reference NFT's later movement is governed by the base layer's
+owner-consent check alone — nothing in this repo re-vets a metadata update, and a seizure cannot
+alter the datum (the base layer requires datum identity per seized pair). Updates pass through the
+transfer logic's gates, so they are blocked while transfers are paused and after deactivation.
+Operational rules:
+
+* Follow the CIP-68 label convention when choosing the asset names: `(100)` prefix for
+  `reference_asset_name`, `(333)` prefix for the fungible `security_asset_name` (the validators treat
+  both as opaque bytes).
+* Never co-locate the reference NFT with the first supply, or with any other output.
+* After `RotateAdmin`, the outgoing admin hands the reference NFT to the new admin with an ordinary
+  owner transfer (same address, new admin's stake credential) — the on-chain pin applies at
+  registration only.
+* A seizure operator must never include the reference NFT's UTxO in a seizure transaction.
 
 ### Execution budget and transaction sizing
 
@@ -278,7 +318,7 @@ binding axis**.
   dedupe check adds a small quadratic term that matters only beyond ~20 parties per side.
 * **Attestation KYC** adds ≈ 0.06 M mem / 74 M CPU per vetted party (one Ed25519 verification);
   membership (MPF) proofs are cheaper.
-* **Forced transfer** ≈ 0.60 M mem / 0.18 G CPU with one destination, ≈ 0.10 M mem / 34 M CPU per
+* **Forced transfer** ≈ 0.60 M mem / 0.18 G CPU with one destination, ≈ 0.10 M mem / 32 M CPU per
   further destination sharing a node.
 * **Redeemer size** ≈ 32 B per party without KYC, ≈ 370 B per party with attestation proofs — the
   16 KiB transaction limit binds near 40 attested parties.
@@ -289,10 +329,10 @@ node; `seizure_cost_by_destination_count`: one seized input, `n` destinations, d
 
 | n | transfer mem | transfer CPU | seizure mem | seizure CPU |
 |---:|---:|---:|---:|---:|
-| 1 | 613,128 | 182,775,654 | 602,213 | 182,255,626 |
-| 4 | 1,236,280 | 380,038,077 | 916,780 | 283,133,176 |
-| 8 | 2,125,720 | 696,021,281 | 1,365,488 | 444,119,896 |
-| 16 | 4,182,808 | 1,524,533,481 | 2,402,008 | 864,366,232 |
+| 1 | 613,128 | 182,775,654 | 596,023 | 180,053,221 |
+| 4 | 1,236,280 | 380,038,077 | 895,326 | 275,166,868 |
+| 8 | 2,125,720 | 696,021,281 | 1,323,682 | 428,468,384 |
+| 16 | 4,182,808 | 1,524,533,481 | 2,319,498 | 833,344,312 |
 
 > **Conservative maxima, at 25% of the budget:** ordinary transfer ≤ 13 unique parties per side
 > denylist-only, ≤ 9 per side with attestation KYC on both sides; seizure ≤ 23 destinations

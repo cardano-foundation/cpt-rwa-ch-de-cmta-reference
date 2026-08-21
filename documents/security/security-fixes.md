@@ -468,6 +468,12 @@ verified — see the same table. `mint_rejects_a_destination_outside_the_program
 `transfer_rejects_a_destination_outside_the_programmable_logic_base` were retired alongside the
 removal, since the payment-credential pin they each pinned no longer exists on those two paths.
 
+**Later hardening (2026-08-21):** the programmable-base payment-credential pin was also removed from
+the **seizure path** (`third_party_transfer_logic_validator`), on the same basis — see the "Seizure
+(forced-transfer) custody" row in
+[the base-layer table](#what-the-cip-113-base-layer-actually-guarantees). The pin is now removed on
+**all three** paths: mint, ordinary transfer and seizure.
+
 ---
 
 ## 7. The GlobalState UTxO's ADA balance was unconstrained
@@ -657,7 +663,9 @@ assumptions. Those were checked by reading
 | A stranger can register a node naming someone else's minting logic | **False** — a protection that was not assumed | `RegistryInsert` requires that credential's own withdraw-0 ("proof of instance") | — |
 | Minted supply is confined to programmable-base addresses | **True** | `issuance_mint`'s `no_escape` forbids the policy at any non-base output and requires an inline stake credential on every base output | The mint-path programmable-base payment-credential pin removal (2026-08-20) |
 | Transfers cannot move tokens out of the base, and conserve value | **True** | the transfer path requires base outputs ⊇ base inputs per policy, which with ledger value-conservation forbids escape | The ordinary-transfer-path programmable-base payment-credential pin removal (2026-08-20) |
+| Seizure (forced-transfer) custody: tokens cannot escape the programmable base | **True** | `validate_io_constraints_and_balance` (`third_party.ak`) requires each spent programmable-base input to pair with an output at the identical address, datum and reference script, and requires the acted-on policy's tokens across **all** programmable-base outputs to be a superset of those across programmable-base inputs plus mint/burn | The seizure-path programmable-base payment-credential pin removal (2026-08-21) |
 | This deployment's transfer logic runs on every spend of its token | **True** | `has_withdrawal(transfer_logic_script)` is required for every input policy proved to exist | `transfer_logic_validator`/`third_party_transfer_logic_validator`'s registry-node read removal (2026-08-20) — no independent registry lookup on transfer or seizure |
+| A registry-node spend can never mint or burn that node's own token | **True** | `registry_spend` hoists `!mint_has_policy(self.mint, spent_node.key)` above its `when`, so it covers both the in-place update and the covering-node spend | `UpgradeRegistryNode`'s belt-and-braces no-mint re-check removal (2026-08-21) |
 | The seizure path is the only one that skips owner consent | **True** | the third-party path never calls `authorised_stake_cred`; the transfer path always does | — |
 
 Two things this settled:
@@ -819,3 +827,20 @@ site. The same three removals were independently requested, in review comments o
 that the programmable-base pin parameter and destination pin are redundant with the CIP-113 core, and
 that the programmable-token policy id should be passed as a validator parameter rather than
 recomputed from the registry node.
+
+### Later hardening — 2026-08-21
+
+Two further removals, both following the same upstream PR #2 review comment (groups A and B): the
+seizure path's programmable-base payment-credential pin was removed, on the same basis as the mint
+and ordinary-transfer removals above, now that the seizure custody guarantee is independently
+verified against the base layer (see the "Seizure (forced-transfer) custody" row in
+[the base-layer table](#what-the-cip-113-base-layer-actually-guarantees)); and the upgrade path's
+belt-and-braces re-check that a registry-node spend mints or burns no supply was removed, relying
+instead on `registry_spend`'s own guarantee (see the "A registry-node spend can never mint or burn
+that node's own token" row in the same table). The same review comment's other two recommendations —
+the list-integrity checks (group C) and the GlobalState/denylist pins (group D) — were reviewed and
+kept, by deliberate decision, as substandard-level invariants the base layer does not itself provide.
+Separately, and by independent decision rather than the review comment: the CIP-68 reference NFT must
+now be minted alone into its own UTxO, never co-located with the first supply.
+
+The same day the reference NFT's owner was pinned to the GlobalState admin credential at registration: the admin is the CIP-68 metadata authority by construction, updating the metadata is the admin's owner-consent re-output of that UTxO with a new inline datum, and after `RotateAdmin` the outgoing admin hands the NFT over with an ordinary transfer (the pin applies at registration only; the datum itself is not inspected on-chain).

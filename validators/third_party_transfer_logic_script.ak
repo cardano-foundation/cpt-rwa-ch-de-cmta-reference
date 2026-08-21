@@ -54,6 +54,10 @@ use utils.{must_be_signed_by_credential}
 ///   - Must actually seize: at least one spent input carries the security
 ///     token (see `at_least_one_seized_input`).
 ///   - `can_force_transfer` power user signs.
+///   - Destination custody inside the programmable-logic base: guaranteed by
+///     the CIP-113 base layer's own `validate_io_constraints_and_balance`
+///     (third_party.ak, base commit `018415d`) — relied upon here, not
+///     re-checked.
 validator third_party_transfer_logic_validator(
   security_asset_name: ByteArray,
   global_state_policy_id: ByteArray,
@@ -82,12 +86,6 @@ validator third_party_transfer_logic_validator(
   /// signs for. Requiring the node to still live at the list's script address
   /// is what makes revocation stick.
   power_user_list_script_hash: ByteArray,
-  /// The CIP-113 programmable-logic base (PLB) script hash — the shared
-  /// payment credential of every compliant token UTxO. Seizure-path custody
-  /// is NOT among the verified base-layer guarantees (unlike ordinary
-  /// transfer and mint), so this pin is the ONLY control keeping a forced
-  /// transfer's destination inside the programmable base.
-  plb_script_hash: ByteArray,
 ) {
   withdraw(
     redeemer: ThirdPartyTransferLogicScriptWithdrawRedeemer,
@@ -124,12 +122,6 @@ validator third_party_transfer_logic_validator(
             expected_issuance_policy_id,
             security_asset_name,
           ) > 0 {
-            // Seizure-path custody is NOT among the verified base-layer
-            // guarantees, so — unlike the ordinary transfer path — this pin
-            // stays: a seizure destination must sit inside the
-            // programmable-logic base.
-            expect Script(dest_payment) = output.address.payment_credential
-            expect dest_payment == plb_script_hash
             // Carry the full `Credential`; the constructor is part of the
             // holder's identity.
             expect Some(Inline(stake_cred)) = output.address.stake_credential
@@ -548,7 +540,6 @@ fn run_third_party(
     p_issuance_policy,
     p_denylist_script_hash,
     p_pu_script_hash,
-    p_plb_hash,
     redeemer,
     Script(p_third_party_hash),
     tx,
