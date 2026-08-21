@@ -256,22 +256,9 @@ validator global_state_spend_validator(
       constants.global_state_asset_name,
     ) == 1
     // ensuring the token amount in the Utxo is preserverd - excluding lovelace
-    let value_preserved = and {
-      without_lovelace(own_input.output.value) == without_lovelace(
-        global_state_output.value,
-      ),
-      // ADA may be topped up but never removed. All eleven branches
-      // compose the same `value_preserved`, so without this line every
-      // authorised action doubles as an undeclared ADA withdrawal — and,
-      // worse, the control UTxO can be starved down to the min-ADA floor,
-      // after which any datum growth (a larger `security_info`, another
-      // trusted entity) makes the continuing output unsatisfiable and the
-      // protocol's ONLY control UTxO becomes permanently unspendable. There
-      // is no way to top it up out of band: every spend runs this validator.
-      assets.lovelace_of(global_state_output.value) >= assets.lovelace_of(
-        own_input.output.value,
-      ),
-    }
+    let value_preserved = without_lovelace(own_input.output.value) == without_lovelace(
+      global_state_output.value,
+    )
 
     // Non-MintSecurity branches reject concurrent security mint (preserves
     // supply-cap integrity across all non-cap-aware admin flows).
@@ -291,27 +278,22 @@ validator global_state_spend_validator(
     // move the security token in the very same transaction — under the rules
     // that were true a moment before the action took effect. No admin action
     // has any legitimate need to move the security token, so forbidding it
-    // here costs nothing and removes the atomicity bypass. `MintSecurity` is
+    // here costs little and removes the atomicity bypass. `MintSecurity` is
     // exempt: it is the one branch that legitimately mints, burns, and
     // otherwise moves the token.
-    let no_security_token_movement = and {
-      list.all(
-        self.inputs,
-        fn(input) {
-          quantity_of(
-            input.output.value,
-            issuance_policy_id,
-            security_asset_name,
-          ) == 0
-        },
-      ),
-      list.all(
-        self.outputs,
-        fn(output) {
-          quantity_of(output.value, issuance_policy_id, security_asset_name) == 0
-        },
-      ),
-    }
+    //
+    // Only the INPUTS are scanned. Every branch that composes this also
+    // composes `no_concurrent_security_mint` (nothing minted or burned under
+    // the security asset), and the ledger conserves value — every unit in an
+    // output comes from an input or from the mint field — so with no unit
+    // spent and none minted, no output can carry the token either. Scanning
+    // the outputs as well would only re-prove ledger conservation.
+    let no_security_token_spent = list.all(
+      self.inputs,
+      fn(input) {
+        quantity_of(input.output.value, issuance_policy_id, security_asset_name) == 0
+      },
+    )
 
     when redeemer.action is {
       MintSecurity { issuance_policy_redeemer_index } -> {
@@ -358,7 +340,7 @@ validator global_state_spend_validator(
         )
         and {
           no_concurrent_security_mint,
-          no_security_token_movement,
+          no_security_token_spent,
           address_preserved,
           nft_preserved,
           value_preserved,
@@ -376,7 +358,7 @@ validator global_state_spend_validator(
         )
         and {
           no_concurrent_security_mint,
-          no_security_token_movement,
+          no_security_token_spent,
           address_preserved,
           nft_preserved,
           value_preserved,
@@ -402,7 +384,7 @@ validator global_state_spend_validator(
         )
         and {
           no_concurrent_security_mint,
-          no_security_token_movement,
+          no_security_token_spent,
           address_preserved,
           nft_preserved,
           value_preserved,
@@ -428,7 +410,7 @@ validator global_state_spend_validator(
         )
         and {
           no_concurrent_security_mint,
-          no_security_token_movement,
+          no_security_token_spent,
           address_preserved,
           nft_preserved,
           value_preserved,
@@ -466,7 +448,7 @@ validator global_state_spend_validator(
         )
         and {
           no_concurrent_security_mint,
-          no_security_token_movement,
+          no_security_token_spent,
           address_preserved,
           nft_preserved,
           value_preserved,
@@ -486,7 +468,7 @@ validator global_state_spend_validator(
         )
         and {
           no_concurrent_security_mint,
-          no_security_token_movement,
+          no_security_token_spent,
           address_preserved,
           nft_preserved,
           value_preserved,
@@ -501,7 +483,7 @@ validator global_state_spend_validator(
         )
         and {
           no_concurrent_security_mint,
-          no_security_token_movement,
+          no_security_token_spent,
           address_preserved,
           nft_preserved,
           value_preserved,
@@ -517,7 +499,7 @@ validator global_state_spend_validator(
         let new_root_len = bytearray.length(new_member_root_hash)
         and {
           no_concurrent_security_mint,
-          no_security_token_movement,
+          no_security_token_spent,
           address_preserved,
           nft_preserved,
           value_preserved,
@@ -538,7 +520,7 @@ validator global_state_spend_validator(
         )
         and {
           no_concurrent_security_mint,
-          no_security_token_movement,
+          no_security_token_spent,
           address_preserved,
           nft_preserved,
           value_preserved,
@@ -558,7 +540,7 @@ validator global_state_spend_validator(
         )
         and {
           no_concurrent_security_mint,
-          no_security_token_movement,
+          no_security_token_spent,
           address_preserved,
           nft_preserved,
           value_preserved,
@@ -581,7 +563,7 @@ validator global_state_spend_validator(
         let expected_output_datum = set_upgrades_locked(input_fields, True)
         and {
           no_concurrent_security_mint,
-          no_security_token_movement,
+          no_security_token_spent,
           address_preserved,
           nft_preserved,
           value_preserved,
@@ -599,7 +581,7 @@ validator global_state_spend_validator(
         let expected_output_datum = set_deactivated(input_fields, True)
         and {
           no_concurrent_security_mint,
-          no_security_token_movement,
+          no_security_token_spent,
           address_preserved,
           nft_preserved,
           value_preserved,
@@ -1067,7 +1049,7 @@ test deactivate_fails_when_output_not_marked_deactivated() {
   )
 }
 
-// ── DeactivateContract — no_security_token_movement ─────────────────────────
+// ── DeactivateContract — no_security_token_spent ─────────────────────────
 //
 // `with_security_token_input`/`with_security_token_output` are defined below,
 // alongside the MintSecurity fixtures — Aiken resolves top-level bindings
@@ -1096,13 +1078,15 @@ test deactivate_rejects_when_an_input_carries_the_security_token() {
   )
 }
 
-test deactivate_rejects_when_an_output_carries_the_security_token() {
+test deactivate_rejects_when_the_security_token_is_minted_into_an_output() {
   let input_datum = t_datum(True, False)
   let output_datum = GlobalStateDatum { ..input_datum, deactivated: True }
   !run_spend(
     input_datum,
     deactivate_redeemer(),
-    with_security_token_output(t_tx(input_datum, output_datum, [t_admin])),
+    with_security_token_minted_into_an_output(
+      t_tx(input_datum, output_datum, [t_admin]),
+    ),
   )
 }
 
@@ -1162,9 +1146,9 @@ fn mintsecurity_redeemer() -> GlobalStateSpendRedeemer {
   }
 }
 
-// ── no_security_token_movement — shared fixtures ────────────────────────────
+// ── no_security_token_spent — shared fixtures ───────────────────────────────
 //
-// Every non-MintSecurity branch composes `no_security_token_movement`. These
+// Every non-MintSecurity branch composes `no_security_token_spent`. These
 // helpers append one extra input, or one extra output, carrying the security
 // token to an otherwise-unmodified transaction — reused by every branch's
 // guard tests below, and by the MintSecurity positive control that proves
@@ -1178,7 +1162,7 @@ fn t_security_token_value() -> Value {
 }
 
 /// An extra input carrying one unit of the security token, parked in a plain
-/// wallet — proves `no_security_token_movement` rejects the token appearing
+/// wallet — proves `no_security_token_spent` rejects the token appearing
 /// as an INPUT, independent of which branch or datum is under test.
 fn t_security_token_input() -> Input {
   Input {
@@ -1195,8 +1179,10 @@ fn t_security_token_input() -> Input {
   }
 }
 
-/// Same, but as an extra OUTPUT — proves the guard also rejects the token on
-/// the output side.
+/// Same, but as an extra OUTPUT. On its own an output with no matching input
+/// is ledger-impossible (value is conserved), so the fixture that uses this
+/// also MINTS the unit — the output side is covered by
+/// `no_concurrent_security_mint`, not by an output scan.
 fn t_security_token_output() -> Output {
   Output {
     address: Address {
@@ -1216,9 +1202,22 @@ fn with_security_token_input(tx: Transaction) -> Transaction {
   }
 }
 
+/// An extra OUTPUT carrying the unit that `with_security_token_input` spends
+/// — a ledger-consistent pass-through, used by the MintSecurity exemption
+/// test (the one branch allowed to move the token).
 fn with_security_token_output(tx: Transaction) -> Transaction {
   Transaction {
     ..tx,
+    outputs: list.concat(tx.outputs, [t_security_token_output()]),
+  }
+}
+
+/// The only ledger-valid way for the token to appear in an output without
+/// being spent is to mint it; `no_concurrent_security_mint` rejects that.
+fn with_security_token_minted_into_an_output(tx: Transaction) -> Transaction {
+  Transaction {
+    ..tx,
+    mint: merge(tx.mint, from_asset(t_issuance_policy, t_sec_name, 1)),
     outputs: list.concat(tx.outputs, [t_security_token_output()]),
   }
 }
@@ -1326,7 +1325,7 @@ test live_contract_still_allows_mint() {
   )
 }
 
-/// MintSecurity is deliberately EXEMPT from `no_security_token_movement` — it
+/// MintSecurity is deliberately EXEMPT from `no_security_token_spent` — it
 /// is the one branch that legitimately mints, burns, and otherwise moves the
 /// token. On top of the ordinary mint-delta this transaction ALSO carries an
 /// unrelated security-token input and output — exactly the shape every other
@@ -1794,7 +1793,7 @@ test pause_fails_when_the_power_user_node_is_in_a_wallet() fail {
   )
 }
 
-// ── PauseTransfers — no_security_token_movement ─────────────────────────────
+// ── PauseTransfers — no_security_token_spent ─────────────────────────────
 
 test pause_succeeds_when_security_token_absent_from_tx() {
   // Positive control paired with the two negatives below — same fixture as
@@ -1816,12 +1815,57 @@ test pause_rejects_when_an_input_carries_the_security_token() {
   )
 }
 
-test pause_rejects_when_an_output_carries_the_security_token() {
+test pause_rejects_when_the_security_token_is_minted_into_an_output() {
   !run_spend(
     t_pause_datum(False),
     t_pause_redeemer(),
-    with_security_token_output(
+    with_security_token_minted_into_an_output(
       t_pause_tx(t_pu_node_at(Script(t_pu_script_hash))),
+    ),
+  )
+}
+
+// ── PauseTransfers — value_preserved (assets.match) ─────────────────────────
+// `value_preserved` is one `assets.match` walk: every non-ADA asset of the
+// continuing output must equal the input's, and ADA may only grow. The two
+// tests below pin both halves locally (ADA removal is covered in
+// `validators/regression.ak`).
+
+const t_foreign_policy: ByteArray =
+  #"ffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+
+/// Rebuild the continuing GlobalState output (index 0, what every redeemer
+/// names) with a transformed value; everything else is untouched.
+fn with_gs_output_value(tx: Transaction, f: fn(Value) -> Value) -> Transaction {
+  expect [gs_out, ..rest] = tx.outputs
+  Transaction {
+    ..tx,
+    outputs: [Output { ..gs_out, value: f(gs_out.value) }, ..rest],
+  }
+}
+
+/// ADA top-up on the control UTxO is allowed (the `>=` arm of `assets.match`).
+test pause_succeeds_when_the_continuing_output_is_topped_up_with_ada() {
+  run_spend(
+    t_pause_datum(False),
+    t_pause_redeemer(),
+    with_gs_output_value(
+      t_pause_tx(t_pu_node_at(Script(t_pu_script_hash))),
+      fn(v) { merge(v, from_lovelace(1_000_000)) },
+    ),
+  )
+}
+
+/// A foreign asset smuggled into the continuing output changes the non-ADA
+/// asset set, which `assets.match` requires to be identical — rejected as a
+/// clean `False` (`value_preserved` is a `Bool` conjunct), hence `!run_spend`.
+test pause_rejects_a_foreign_asset_added_to_the_continuing_output() {
+  !run_spend(
+    t_pause_datum(False),
+    t_pause_redeemer(),
+    with_gs_output_value(
+      t_pause_tx(t_pu_node_at(Script(t_pu_script_hash))),
+      fn(v) { merge(v, from_asset(t_foreign_policy, "X", 1)) },
     ),
   )
 }
@@ -2284,7 +2328,7 @@ test remove_trusted_entity_cannot_smuggle_another_field_change() {
   )
 }
 
-// ── RemoveTrustedEntity — no_security_token_movement ────────────────────────
+// ── RemoveTrustedEntity — no_security_token_spent ────────────────────────
 
 test remove_trusted_entity_succeeds_when_security_token_absent_from_tx() {
   let input_datum = t_tel_datum()
@@ -2312,7 +2356,7 @@ test remove_trusted_entity_rejects_when_an_input_carries_the_security_token() {
   )
 }
 
-test remove_trusted_entity_rejects_when_an_output_carries_the_security_token() {
+test remove_trusted_entity_rejects_when_the_security_token_is_minted_into_an_output() {
   let input_datum = t_tel_datum()
   let output_datum = GlobalStateDatum {
     ..input_datum,
@@ -2321,7 +2365,9 @@ test remove_trusted_entity_rejects_when_an_output_carries_the_security_token() {
   !run_spend(
     input_datum,
     remove_trusted_entity_redeemer(t_vkey_10),
-    with_security_token_output(t_tx(input_datum, output_datum, [t_admin])),
+    with_security_token_minted_into_an_output(
+      t_tx(input_datum, output_datum, [t_admin]),
+    ),
   )
 }
 
@@ -2572,7 +2618,7 @@ test set_requires_sender_kyc_cannot_smuggle_another_field_change() {
   )
 }
 
-// ── SetRequiresSenderKyc — no_security_token_movement ───────────────────────
+// ── SetRequiresSenderKyc — no_security_token_spent ───────────────────────
 
 test set_requires_sender_kyc_succeeds_when_security_token_absent_from_tx() {
   let input_datum = t_datum(False, False)
@@ -2600,7 +2646,7 @@ test set_requires_sender_kyc_rejects_when_an_input_carries_the_security_token() 
   )
 }
 
-test set_requires_sender_kyc_rejects_when_an_output_carries_the_security_token() {
+test set_requires_sender_kyc_rejects_when_the_security_token_is_minted_into_an_output() {
   let input_datum = t_datum(False, False)
   let output_datum = GlobalStateDatum {
     ..input_datum,
@@ -2609,7 +2655,9 @@ test set_requires_sender_kyc_rejects_when_an_output_carries_the_security_token()
   !run_spend(
     input_datum,
     set_requires_sender_kyc_redeemer(True),
-    with_security_token_output(t_tx(input_datum, output_datum, [t_admin])),
+    with_security_token_minted_into_an_output(
+      t_tx(input_datum, output_datum, [t_admin]),
+    ),
   )
 }
 
@@ -2762,7 +2810,7 @@ test update_member_root_hash_accepts_clearing_back_to_empty() {
   )
 }
 
-// ── UpdateMemberRootHash — no_security_token_movement ───────────────────────
+// ── UpdateMemberRootHash — no_security_token_spent ───────────────────────
 
 test update_member_root_hash_succeeds_when_security_token_absent_from_tx() {
   let input_datum = t_datum(False, False)
@@ -2790,7 +2838,7 @@ test update_member_root_hash_rejects_when_an_input_carries_the_security_token() 
   )
 }
 
-test update_member_root_hash_rejects_when_an_output_carries_the_security_token() {
+test update_member_root_hash_rejects_when_the_security_token_is_minted_into_an_output() {
   let input_datum = t_datum(False, False)
   let output_datum = GlobalStateDatum {
     ..input_datum,
@@ -2799,6 +2847,8 @@ test update_member_root_hash_rejects_when_an_output_carries_the_security_token()
   !run_spend(
     input_datum,
     update_member_root_hash_redeemer(t_root32),
-    with_security_token_output(t_tx(input_datum, output_datum, [t_admin])),
+    with_security_token_minted_into_an_output(
+      t_tx(input_datum, output_datum, [t_admin]),
+    ),
   )
 }

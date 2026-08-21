@@ -844,3 +844,5 @@ Separately, and by independent decision rather than the review comment: the CIP-
 now be minted alone into its own UTxO, never co-located with the first supply.
 
 The same day the reference NFT's owner was pinned to the GlobalState admin credential at registration: the admin is the CIP-68 metadata authority by construction, updating the metadata is the admin's owner-consent re-output of that UTxO with a new inline datum, and after `RotateAdmin` the outgoing admin hands the NFT over with an ordinary transfer (the pin applies at registration only; the datum itself is not inspected on-chain).
+
+Following the upstream review of 2026-08-21, two GlobalState checks were made cheaper without changing what they accept: the continuing-output value check now uses `assets.match` (one walk over both values — non-ADA assets identical, ADA may only grow), and the "no security token in this transaction" guard scans only the inputs, because every branch that composes it also forbids any mint or burn of the security asset and the ledger conserves value, so no output can carry a unit that was neither spent nor minted.

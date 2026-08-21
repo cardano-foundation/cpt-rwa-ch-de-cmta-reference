@@ -549,7 +549,7 @@ pub type GlobalStateSpendAction {
   /// is hidden, only foreclosed one transaction later than a naive reading of
   /// "already locked/rotated/deactivated" would suggest. What none of this
   /// reopens is token movement: that path is closed independently, by
-  /// `no_security_token_movement` in the spend validator, which every
+  /// `no_security_token_spent` in the spend validator, which every
   /// non-MintSecurity branch composes regardless of which field it touches.
   LockUpgrades
   /// One-way decommissioning switch. Sets `deactivated = True`. Requires the
