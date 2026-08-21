@@ -1,3 +1,4 @@
+use types/global_state.{GlobalStateLocation}
 use types/kyc_proof.{KycProof}
 
 /// One entry per unique destination (unique stake-credential among outputs
@@ -20,20 +21,20 @@ pub type MintingLogicDestinationAction {
 /// this validator's withdraw-0 to be present for any transaction that moves
 /// the security token's supply, but hands this validator NOTHING
 /// pre-verified — this redeemer carries everything needed to decide, and
-/// every input is independently re-resolved and re-checked here. The two
-/// variants differ only in where this token's registry node can be found.
+/// every input is independently re-resolved and re-checked here.
+///
+/// `MintBurn` never reads the registry at all: the issuance policy it
+/// polices is pinned at compile time, and the base layer already
+/// authenticates whichever registry node invoked this withdraw-0 in the
+/// first place. The other three variants still resolve a registry node —
+/// `RegisterMint`/`RegisterStructural` because the node does not exist as a
+/// UTxO yet (it is being created), `UpgradeRegistryNode` because IT is the
+/// one path that may rewrite the node — for CIP-113 structural invariants
+/// only they enforce.
 pub type MintingAuthorityWithdrawRedeemer {
   /// Steady state: the registry node already exists as a UTxO and is
   /// supplied as a reference input.
   MintBurn {
-    /// Index into `self.reference_inputs` — the CIP-113 registry node for
-    /// THIS token. Independently re-resolved and re-verified here (against
-    /// this deployment's known, permanent proxy hash — NOT this script's own
-    /// hash, since the registry node names the proxy) rather than trusted
-    /// from the proxy: without this, a redeemer could name an unrelated
-    /// (decoy) issuance policy, making every check below vacuous while a
-    /// DIFFERENT, real mint under the genuine policy proceeds unchecked.
-    registry_node_ref_input_index: Int,
     /// Index into `self.inputs` — the same GlobalState UTxO the proxy
     /// resolves (shared, transaction-wide data; a wrong index just fails the
     /// NFT check).
@@ -96,10 +97,16 @@ pub type MintingAuthorityWithdrawRedeemer {
     registry_node_input_index: Int,
     /// Index into `self.outputs` — the continuing node.
     registry_node_output_index: Int,
-    /// Index into `self.reference_inputs` — GlobalState, read for the admin
-    /// credential and the upgrade lock. Referenced rather than spent: no
-    /// supply changes, so there is no cap to enforce.
-    global_state_ref_input_index: Int,
+    /// WHERE GlobalState is — read for the admin credential and the upgrade
+    /// lock, nothing more. Deliberately a location rather than a fixed
+    /// reference index: this variant makes no claim that depends on the GS
+    /// spend validator having run, so pinning it to one list would only forbid
+    /// upgrading a registry node in the same transaction that spends
+    /// GlobalState (Conway rejects the overlap). Contrast `MintBurn` and
+    /// `RegisterMint` below, whose bare `global_state_input_index` is
+    /// load-bearing: they MUST spend, or `MintSecurity` never runs and the
+    /// supply cap goes unenforced. The type carries that distinction.
+    global_state_location: GlobalStateLocation,
   }
   /// A CIP-113 registration that mints nothing — it only creates the registry
   /// node. GlobalState is merely REFERENCED (there is no supply change, so
@@ -109,8 +116,10 @@ pub type MintingAuthorityWithdrawRedeemer {
   RegisterStructural {
     /// Index into `self.outputs` — as in `RegisterMint`.
     registry_node_output_index: Int,
-    /// Index into `self.reference_inputs` — GlobalState, read for the admin
-    /// credential.
-    global_state_ref_input_index: Int,
+    /// WHERE GlobalState is — read for the admin credential only. A location
+    /// for the same reason as `UpgradeRegistryNode`: nothing here depends on
+    /// the GS spend validator running, and a structural registration should
+    /// not be barred from a transaction that also spends GlobalState.
+    global_state_location: GlobalStateLocation,
   }
 }

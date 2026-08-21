@@ -70,10 +70,19 @@ issuer and registrar.
 
 ### Review and audit
 
-* **Penetration testing** — two engagements have been carried out; the reports are in
-  [`documents/pentesting/`](documents/pentesting/).
+* **Penetration testing** — two engagements have been carried out by FT Labs, on 23 and 26 June
+  2026, against commits `dd2b754` and `1beeed6` respectively; the reports are in
+  [`documents/pentesting/`](documents/pentesting/). The 2026-08-19/20 internal review and its
+  fixes ([`documents/security/security-fixes.md`](documents/security/security-fixes.md)), the
+  minting-proxy upgradability, and the `GlobalStateLocation` change all postdate both engagements,
+  so neither report covers the current code.
 * **Formal security audit** — an official third-party audit is **planned and not yet completed**.
   Until it has been, treat this code as unaudited.
+* **Internal security review** — an adversarial self-review of the compliance layer found and fixed
+  a set of defects, two of them critical. Each is written up with its cause, its fix and the
+  reasoning in [`documents/security/security-fixes.md`](documents/security/security-fixes.md), and
+  each is pinned by a test in [`validators/regression.ak`](validators/regression.ak). This is not a
+  substitute for the third-party audit above.
 * **Third-party equivalency assessment** — an independent CMTAT mapping of this codebase is
   maintained at [CMTA/CMTAT-Cardano](https://github.com/CMTA/CMTAT-Cardano).
 
@@ -109,13 +118,30 @@ issuer and registrar.
   toggled independently.
 * Forced transfers move tokens to a vetted destination. They intentionally remain available while
   transfers are paused, so enforcement is not blocked by a pause.
-* Minting is capped; burning returns headroom to the cap.
+* **The pause gate covers transfers only.** Minting and burning stay available during a pause, for
+  the same reason forced transfers do: the register must remain correctable, and a court- or
+  regulator-ordered burn cannot wait for an unpause. This follows the CMTAT reference
+  implementation, where mint and burn go through `_update` rather than the pause-checked transfer
+  path. Two consequences to plan around: position sizes can change while the register is otherwise
+  static (every such change is still signed, on-chain, power-user-gated and cap-enforced), and a
+  holder minted to during a pause cannot move the tokens until it lifts — so do not mint to third
+  parties mid-pause.
+* Minting is capped; burning returns headroom to the cap. **Burning existing supply spends a
+  programmable-base UTxO, so the CIP-113 base layer makes the transfer logic run over it** — which
+  means a burn during a pause, or from a sanctioned holder, must instead be routed through the
+  forced-transfer path and needs `can_force_transfer`, not just `can_burn`.
+* **Seizure is all-or-nothing per UTxO against a sanctioned holder.** The base layer returns a
+  partial seizure's residual to the holder's own address, which then has to clear the denylist —
+  and cannot. Drain whole UTxOs instead; a position can still be partially seized by choosing which
+  UTxOs to spend. Both constraints are explained in
+  [`documents/security/security-fixes.md`](documents/security/security-fixes.md).
 * Deactivation is one-way and requires a paused protocol first — it is a decommissioning switch, not
   a stronger pause.
 
 ## Building the scripts
 
-Requires Aiken **v1.1.22**, pinned in [`aiken.toml`](aiken.toml) and matched by CI.
+Requires Aiken **v1.1.23**, pinned in [`aiken.toml`](aiken.toml) and matched by CI.
+Both linked lists are built on `anastasia-labs/aiken-design-patterns` **v1.8.0**.
 
 ```sh
 aiken fmt --check   # formatting
@@ -127,18 +153,230 @@ aiken build         # compile; regenerates plutus.json
 so the blueprint contains **unapplied** scripts — apply parameters with `aiken blueprint apply` (or
 the equivalent in your off-chain library) before deriving any hash or address.
 
-Parameters have to be applied in dependency order, because each layer's policy ID is an input to
-the next:
+### Prerequisites
 
-1. Choose the genesis UTxO (`tx0`, `index0`) and apply it to `global_state_mint_validator` →
-   **GlobalState policy ID**
-2. That, plus one genesis UTxO per list, applied to `power_users.mint` and `denylist.mint` →
-   **power-users** and **denylist policy IDs**
-3. Those, plus `security_asset_name` and the CIP-113 registry policy ID, applied to
-   `minting_logic_validator` → its hash yields the **issuance policy ID**, which *is* the security
-   token's policy ID
-4. The issuance policy ID applied to `global_state_spend_validator`
-5. `transfer_logic_validator` and `third_party_transfer_logic_validator` from the same set
+One value comes from the deployed CIP-113 base layer of the target network, not from this repo —
+obtain it before applying any parameters:
+
+* **`registry_policy_id`** — the CIP-113 registry mint policy id.
+
+**`plb_script_hash`** — the CIP-113 programmable-logic-base (PLB) script hash — is **off-chain
+only**: the address of every programmable-token UTxO. No validator in this repo takes it as a
+compile-time parameter any more; the base layer's own custody guarantees cover mint, ordinary
+transfer and seizure alike (see
+[What is delegated to the CIP-113 base layer](#what-is-delegated-to-the-cip-113-base-layer)).
+
+### Parameter order
+
+Parameters have to be applied in dependency order — GlobalState policy → the two lists →
+the minting-logic proxy → the rest — because each layer's policy ID or script hash feeds later
+validators. The table below is exhaustive and lists, for every validator, its parameters in the
+exact order the blueprint (`plutus.json`) declares them; apply top to bottom.
+
+> `aiken blueprint apply` takes parameters **positionally, one at a time**, and shared parameters
+> are **not** in a shared order across validators — e.g. row 7 (`global_state_spend_validator`)
+> lists the issuance policy id before `global_state_policy_id`, while rows 8–10 list
+> `global_state_policy_id` first. Always follow this validator's own row below; never assume a
+> "usual" order.
+
+| # | Validator | Parameters (blueprint order) | Source |
+|---|---|---|---|
+| 1 | `global_state.global_state_mint_validator` (mint) | `tx0`, `index0` | The genesis UTxO you choose to spend. |
+| 2 | `power_users.mint` | `global_state_policy_id`, `init_input_out_ref` | Row 1; a genesis UTxO reserved for this list. |
+| 3 | `power_users.power_users_validator` (spend) | `global_state_policy_id`, `power_users_linked_list_policy_id` | Row 1; the hash of `power_users.mint` (row 2) — this is the **power-users policy ID**. |
+| 4 | `denylist.mint` | `global_state_policy_id`, `init_input_out_ref`, `power_user_list_script_hash` | Row 1; a genesis UTxO reserved for this list; the hash of `power_users_validator` (row 3, **spend** — not row 2's policy id). |
+| 5 | `denylist.denylist_validator` (spend) | `denylist_linked_list_policy_id` | The hash of `denylist.mint` (row 4) — this is the **denylist policy ID**. |
+| 6 | `minting_logic_script.minting_logic_validator` | `global_state_policy_id` | Row 1. Its only parameter. |
+| 7 | `global_state.global_state_spend_validator` (spend) | `security_asset_name`, `issuance_policy_id`, `global_state_policy_id`, `power_user_list_script_hash` | Operator choice; the hash of `minting_logic_validator` (row 6) — the **issuance policy ID**, i.e. the security token's policy ID; row 1; the hash of `power_users_validator` (row 3). |
+| 8 | `transfer_logic_script.transfer_logic_validator` | `security_asset_name`, `global_state_policy_id`, `expected_issuance_policy_id`, `denylist_script_hash` | Operator choice; row 1; the hash of `minting_logic_validator` (row 6); the hash of `denylist_validator` (row 5). |
+| 9 | `third_party_transfer_logic_script.third_party_transfer_logic_validator` | `security_asset_name`, `global_state_policy_id`, `expected_issuance_policy_id`, `denylist_script_hash`, `power_user_list_script_hash` | Operator choice; row 1; row 6's hash; row 5's hash; row 3's hash. (The power-users policy id is read from the GlobalState datum at run time, not compiled in.) |
+| 10 | `minting_authority.minting_authority_validator` | `security_asset_name`, `global_state_policy_id`, `registry_policy_id`, `power_users_linked_list_policy_id`, `minting_logic_script_credential_hash`, `expected_issuance_policy_id`, `denylist_script_hash`, `power_user_list_script_hash`, `reference_asset_name` | Operator choice; row 1; Prerequisites; row 2's hash; row 6's hash; row 6's hash again (**must be identical to the previous value** — see below); row 5's hash; row 3's hash; operator choice (see below). |
+
+### What the derived parameters must equal
+
+* `power_user_list_script_hash` — the hash of `power_users.power_users_validator` (the **spend**
+  validator), **not** `power_users.mint`'s policy id.
+* `denylist_script_hash` — the hash of `denylist.denylist_validator` (**spend**), **not**
+  `denylist.mint`'s policy id.
+* `power_users_linked_list_policy_id` / `denylist_linked_list_policy_id` — the respective `mint`
+  validator hashes (their policy ids).
+* `issuance_policy_id`, `expected_issuance_policy_id` and `minting_logic_script_credential_hash` —
+  all three are the hash of `minting_logic_script.minting_logic_validator`. The last two are two
+  separate parameter slots of `minting_authority_validator` (row 10) and **must receive the
+  identical value**; a deploy script should assert this rather than rely on it by construction.
+* `security_asset_name` / `reference_asset_name` — operator choices. Setting `reference_asset_name`
+  equal to `security_asset_name` disables the CIP-68 reference NFT: the security-asset arm of the
+  mint allowlist matches first, so the reference arm becomes unreachable (see the parameter doc
+  comments in [`validators/minting_authority.ak`](validators/minting_authority.ak)).
+* `tx0` / `index0` / `init_input_out_ref` — one-shot genesis UTxOs, each spent once during
+  initialisation (see [Initialising a token](#initialising-a-token)).
+
+### Deployment: reference scripts
+
+Four validators are withdraw-0 scripts, i.e. they run as zero-value withdrawals rather than as the
+spending or minting script of any UTxO: `transfer_logic_validator` (~6.1 KB, every transfer),
+`third_party_transfer_logic_validator` (~6.7 KB, every seizure), `minting_authority_validator`
+(~8.4 KB, every mint and burn) and the minting proxy `minting_logic_validator` (~1.1 KB, also every
+mint and burn — the proxy's withdraw-0 is what the CIP-113 registry node invokes, and it in turn
+requires the authority's). The three large ones must be published once as reference-script UTxOs and
+supplied via reference inputs — not inlined (a transaction is capped at 16 KiB); the proxy is small
+enough to inline but is simplest to publish alongside them. The two list `mint` validators
+(~4.7–5.2 KB) should in practice be treated the same way.
+
+All four withdraw-0 scripts need their **stake credential registered** on chain before the first
+transaction that names them in `withdrawals` — see step 4 of [Initialising a token](#initialising-a-token).
+A withdrawal from an unregistered credential is rejected by the ledger at phase 1, before any script
+runs, so forgetting the proxy's registration makes every mint and burn fail from genesis on.
+
+> **The list SCRIPT hashes are not the list POLICY IDs.** Each list file declares a `mint` validator
+> and a separate spend validator, so their hashes differ. Passing a policy ID where a script hash is
+> expected disables the check silently — every element read would reject, and the protocol would be
+> inert rather than insecure, but it would be inert *quietly*.
+
+> **Verify before genesis, off-chain:** that the two linked-list policy IDs differ and each matches
+> the corresponding compiled `mint` validator hash, and that the GlobalState NFT actually lands at
+> `global_state_spend_validator`'s address. The on-chain code checks what it can (the IDs must
+> differ and be 28 bytes) but cannot bind an ID to a hash, and the genesis mint validator cannot see
+> its own spend counterpart's address.
+
+### What is delegated to the CIP-113 base layer
+
+This deployment's own scripts do not re-check everything the CIP-113 base layer already enforces
+independently. In plain terms, the base layer guarantees:
+
+* **Custody on mint.** `issuance_mint`'s `no_escape` rule keeps every newly minted token inside the
+  programmable base and forces an inline stake credential onto every programmable-base output.
+* **Custody on ordinary transfer.** The transfer path requires programmable-base outputs to hold, per
+  policy, at least as much as programmable-base inputs (`tokens.contains(PLB outputs, PLB inputs)`),
+  which — combined with ledger value conservation — keeps the token inside the base.
+* **Custody on seizure (forced transfer).** `validate_io_constraints_and_balance` (`third_party.ak`)
+  requires every spent programmable-base input to be paired with an output at the identical address,
+  datum and reference script, and requires the acted-on policy's tokens across **all**
+  programmable-base outputs to be a superset of those across programmable-base inputs plus mint/burn
+  — the same custody guarantee as mint and ordinary transfer, independently verified for the seizure
+  path.
+* **Registry integrity.** A registry node's key is cryptographically bound to its
+  `minting_logic_script` field, and on an in-place upgrade the base layer itself keeps `key`, `next`
+  and `minting_logic_script` frozen.
+* **No supply change on an upgrade.** `registry_spend` hoists
+  `!mint_has_policy(self.mint, spent_node.key)` above its `when`, so it covers both the in-place
+  update and the covering-node spend: a transaction that spends a registry node can never mint or
+  burn that node's own token. An upgrade can change transfer-logic rules; it can never touch supply.
+* **Which registry node gets to invoke a logic script.** The base layer authenticates the registry
+  node it uses to dispatch to a logic script's withdraw-0.
+
+Because of the registry-dispatch point, this deployment's transfer, seizure and mint/burn logic no
+longer read or re-derive a registry node at all on those paths — the issuance policy each one polices
+is pinned at compile time instead. Because of the three custody points, none of the mint,
+ordinary-transfer or seizure paths re-check programmable-base custody themselves any more; all three
+rely on the base layer's own guarantees. And because of the no-supply-change point, the upgrade path
+no longer re-checks that a spend-and-update transaction mints or burns nothing; it relies on
+`registry_spend` alone.
+
+These guarantees were verified against CIP-113 base-layer commit `018415d`. Upgrading the deployed
+base layer invalidates that verification and requires re-checking it before relying on this section
+again.
+
+### CIP-68 reference NFT custody
+
+The CIP-68 reference NFT is holding metadata, not value. It is minted exactly once, at registration, and
+must start life **alone** in its own UTxO — no other asset of the issuance policy (including the
+first supply) co-located with it, and carrying its own min-ADA. Its owner — the inline stake
+credential of that output — **must be the GlobalState admin credential** at registration
+(`reference_nft_output_is_pinned` enforces it), so the admin is the CIP-68 metadata authority by
+construction. A metadata update is the admin spending that UTxO — an ordinary CIP-113 owner-consent
+transfer to the same address — and re-outputting the NFT with the new inline datum
+(`Constr 0 [metadata map, version, extra]`, per CIP-68); the datum content is not inspected on-chain.
+Because every compliance scan in this substandard (denylist, KYC, seizure) is scoped to
+`security_asset_name`, the reference NFT's later movement is governed by the base layer's
+owner-consent check alone — nothing in this repo re-vets a metadata update, and a seizure cannot
+alter the datum (the base layer requires datum identity per seized pair). Updates pass through the
+transfer logic's gates, so they are blocked while transfers are paused and after deactivation.
+Operational rules:
+
+* Follow the CIP-68 label convention when choosing the asset names: `(100)` prefix for
+  `reference_asset_name`, `(333)` prefix for the fungible `security_asset_name` (the validators treat
+  both as opaque bytes).
+* Never co-locate the reference NFT with the first supply, or with any other output.
+* After `RotateAdmin`, the outgoing admin hands the reference NFT to the new admin with an ordinary
+  owner transfer (same address, new admin's stake credential) — the on-chain pin applies at
+  registration only.
+* A seizure operator must never include the reference NFT's UTxO in a seizure transaction.
+
+### Execution budget and transaction sizing
+
+Figures below are measured with `aiken bench` (`aiken bench -m "transfer_logic_script.{..}"
+--max-size 40`; the per-test execution units `aiken check` prints are the other source) against the
+current, cost-optimised implementation. They are for this deployment's scripts alone — the CIP-113
+base layer shares the same per-transaction budget, 10 000 M CPU / 14 M memory, and **memory is the
+binding axis**.
+
+* **Ordinary transfer**, denylist-only, one sender and one destination: ≈ 0.61 M mem / 0.18 G CPU.
+  Each further party on a side that cites the same denylist covering node as the party before it
+  adds ≈ 0.10 M mem / 33 M CPU — the node is authenticated once per run of adjacent parties citing
+  it; a party citing a different node pays the full authentication, ≈ 0.15 M mem / 45 M CPU. The
+  dedupe check adds a small quadratic term that matters only beyond ~20 parties per side.
+* **Attestation KYC** adds ≈ 0.06 M mem / 74 M CPU per vetted party (one Ed25519 verification);
+  membership (MPF) proofs are cheaper.
+* **Forced transfer** ≈ 0.60 M mem / 0.18 G CPU with one destination, ≈ 0.10 M mem / 32 M CPU per
+  further destination sharing a node.
+* **Redeemer size** ≈ 32 B per party without KYC, ≈ 370 B per party with attestation proofs — the
+  16 KiB transaction limit binds near 40 attested parties.
+
+`aiken bench -m "transfer_logic_script.{..}" --max-size 40` scales linearly in `n` on both benches
+(`transfer_cost_by_party_count`: `n` senders + `n` destinations, denylist-only, root-only covering
+node; `seizure_cost_by_destination_count`: one seized input, `n` destinations, denylist-only):
+
+| n | transfer mem | transfer CPU | seizure mem | seizure CPU |
+|---:|---:|---:|---:|---:|
+| 1 | 613,128 | 182,775,654 | 596,023 | 180,053,221 |
+| 4 | 1,236,280 | 380,038,077 | 895,326 | 275,166,868 |
+| 8 | 2,125,720 | 696,021,281 | 1,323,682 | 428,468,384 |
+| 16 | 4,182,808 | 1,524,533,481 | 2,319,498 | 833,344,312 |
+
+> **Conservative maxima, at 25% of the budget:** ordinary transfer ≤ 13 unique parties per side
+> denylist-only, ≤ 9 per side with attestation KYC on both sides; seizure ≤ 23 destinations
+> denylist-only, ≤ 16 with receiver KYC. Split larger distributions; keep parties that share a
+> covering node adjacent in the action lists — they follow input/output order.
+
+## KYC proof formats
+
+Both proof types bind the same five things: **who** (credential hash), **which credential form**
+(key or script), **how long** (TTL), **which token** (issuance policy ID) and **which network**.
+
+**Attestation** — a 67-byte payload, raw Ed25519-signed by a key in `trusted_entity_vkeys`:
+
+| Bytes | Field | Width |
+|---|---|---|
+| 0–27 | `user_pkh` | 28 |
+| 28 | `user_kyc_tier` | 1 |
+| 29–36 | `valid_until_ms` (big-endian) | 8 |
+| 37–64 | `security_policy_id` | 28 |
+| 65 | `network_id` | 1 |
+| 66 | `credential_type` — `0x00` VerificationKey, `0x01` Script | 1 |
+
+**Membership** — a Merkle-Patricia-Forestry leaf under `member_root_hash`:
+
+* key — `credential_type(1) ‖ credential_hash(28)`
+* value — `valid_until_ms(8) ‖ security_policy_id(28) ‖ network_id(1)`
+
+`lib/kyc/verify.ak` exports `membership_leaf_key` and `membership_leaf_value` as the normative
+encoders; the off-chain tree builder must produce byte-identical leaves.
+
+> **The credential form is part of the identity.** A verification key and a script sharing a 28-byte
+> hash are different holders — the CIP-113 base layer authorises the first by signature and the
+> second by withdraw-0 — so an attestation names which one it was issued for. An attestation issued
+> for one form is rejected for the other.
+>
+> The **denylist** deliberately works the other way: it keys on the bare hash, so sanctioning a hash
+> sanctions both forms. That is the conservative direction and is intentional.
+
+**Redeemer indexing.** The transfer redeemer's `actions_for_each_input` and `destination_actions`
+are matched positionally against the list of unique parties, and "unique" now means unique
+*credential*, not unique hash. So a verification key and a script sharing a 28-byte hash count as
+two parties needing two actions. Constructing such a pair is computationally infeasible, so in
+practice nothing changes — but the rule is stated so an integrator building the action list knows
+which key to deduplicate on.
 
 ## Initialising a token
 
@@ -153,9 +391,16 @@ deterministic chain and signed in a single batch.
    policy. Nothing validates until this node exists.
 3. **Initialise the linked lists** — mint the root node of the power-users list and of the denylist
    (one transaction each).
-4. **Register the logic scripts' stake credentials** — the three logic validators are invoked as
-   zero-value withdrawals, so their stake credentials must be registered before any transfer, mint
-   or burn can reference them.
+4. **Register the logic scripts' stake credentials** — all **four** withdraw-0 validators are
+   invoked as zero-value withdrawals, so each one's stake credential must be registered before any
+   transfer, mint or burn can reference it: the minting proxy `minting_logic_validator`,
+   `minting_authority_validator`, `transfer_logic_validator` and
+   `third_party_transfer_logic_validator`. Mint and burn need the first two (the proxy's
+   withdraw-0 requires the authority's); transfers need the third; seizures the fourth. A
+   withdrawal from an unregistered credential fails at ledger phase 1 — before any validator runs —
+   so a missing registration surfaces as every such transaction being rejected, not as a script
+   error. Each of these validators' `publish` handler accepts only `RegisterCredential`, so the
+   registration can never be undone by a third party.
 5. **Assign power users** — insert one node per operator, with the role flags that operator should
    hold.
 6. **Mint the initial supply** — spends GlobalState to decrement the cap and mints under the
