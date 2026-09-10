@@ -597,9 +597,10 @@ Constructing such a pair is computationally infeasible, so in practice nothing c
 rule is stated because it decides which key an integrator deduplicates on.
 
 **Pinned by** `attestation_fails_when_credential_type_mismatches` and
-`attestation_fails_when_script_payload_used_for_a_key` (both directions — a one-directional check
-would still let one form impersonate the other), `membership_leaf_key_separates_credential_forms`,
-and four tests covering the two *separate* dedup implementations:
+`attestation_fails_when_script_payload_used_for_a_key`, both using genuine signatures so the
+credential-form mismatch is isolated (both directions — a one-directional check would still let one
+form impersonate the other), `membership_leaf_key_separates_credential_forms`, and four tests
+covering the two *separate* dedup implementations:
 `transfer_treats_key_and_script_forms_of_one_hash_as_two_parties` /
 `transfer_rejects_one_action_covering_both_credential_forms` for `list.unique`, and
 `mint_treats_key_and_script_forms_of_one_hash_as_two_destinations` /

@@ -97,6 +97,11 @@ const TEST_SECURITY_POLICY_ID =
   "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const TEST_TTL_MS = 100_000_000;
 const TEST_NETWORK_ID = 1;
+const TEST_WRONG_USER_PKH =
+  "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+const TEST_WRONG_SECURITY_POLICY_ID =
+  "ffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+const TEST_EXPIRED_TTL_MS = 49_999_999;
 
 // validators/transfer_logic_script.ak
 const T_SENDER_STAKE =
@@ -134,6 +139,51 @@ const VECTORS = [
     securityPolicyIdHex: TEST_SECURITY_POLICY_ID,
     networkId: TEST_NETWORK_ID,
     credentialType: 0x01,
+  },
+  {
+    name: "verify.ak — negative: wrong user_pkh",
+    userPkhHex: TEST_WRONG_USER_PKH,
+    tier: 0x01,
+    validUntilMs: TEST_TTL_MS,
+    securityPolicyIdHex: TEST_SECURITY_POLICY_ID,
+    networkId: TEST_NETWORK_ID,
+    credentialType: 0x00,
+  },
+  {
+    name: "verify.ak — negative: invalid tier",
+    userPkhHex: TEST_USER_PKH,
+    tier: 0x00,
+    validUntilMs: TEST_TTL_MS,
+    securityPolicyIdHex: TEST_SECURITY_POLICY_ID,
+    networkId: TEST_NETWORK_ID,
+    credentialType: 0x00,
+  },
+  {
+    name: "verify.ak — negative: expired TTL",
+    userPkhHex: TEST_USER_PKH,
+    tier: 0x01,
+    validUntilMs: TEST_EXPIRED_TTL_MS,
+    securityPolicyIdHex: TEST_SECURITY_POLICY_ID,
+    networkId: TEST_NETWORK_ID,
+    credentialType: 0x00,
+  },
+  {
+    name: "verify.ak — negative: wrong security_policy_id",
+    userPkhHex: TEST_USER_PKH,
+    tier: 0x01,
+    validUntilMs: TEST_TTL_MS,
+    securityPolicyIdHex: TEST_WRONG_SECURITY_POLICY_ID,
+    networkId: TEST_NETWORK_ID,
+    credentialType: 0x00,
+  },
+  {
+    name: "verify.ak — negative: wrong network_id",
+    userPkhHex: TEST_USER_PKH,
+    tier: 0x01,
+    validUntilMs: TEST_TTL_MS,
+    securityPolicyIdHex: TEST_SECURITY_POLICY_ID,
+    networkId: 0x02,
+    credentialType: 0x00,
   },
   {
     name: "transfer_logic_script.ak — vector (c): sender (t_sender_stake)",

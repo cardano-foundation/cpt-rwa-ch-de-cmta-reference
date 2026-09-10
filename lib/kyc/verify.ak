@@ -278,15 +278,14 @@ const test_security_policy_id: ByteArray =
 
 // 32-byte Ed25519 verification key representing the trusted issuer. This is
 // a GENUINE key, not a placeholder: it is the public half of the fixed-seed
-// key pair derived by `scripts/kyc-test-vectors.mjs`, so both the negative
-// tests below (which never verify a real signature against it) and the
-// positive tests (which do) share one issuer identity. Re-run the script to
-// reproduce this value.
+// key pair derived by `scripts/kyc-test-vectors.mjs`. Field-binding negative
+// tests and positive tests both use genuine signatures from this key. Re-run
+// the script to reproduce this value.
 const test_issuer_vkey: ByteArray =
   #"03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8"
 
-// 64 placeholder bytes — not a valid Ed25519 signature. Used in negative tests
-// where correct byte length is required but sig_ok = True is not.
+// 64 placeholder bytes — not a valid Ed25519 signature. Used only in tests that
+// intentionally exercise malformed signatures or earlier validation gates.
 const test_invalid_signature: ByteArray =
   #"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
 
@@ -316,6 +315,23 @@ const test_genuine_signature_key_cred: ByteArray =
 // form.
 const test_genuine_signature_script_cred: ByteArray =
   #"e4ee6d9812a57c619895b08b5e1413c070d9e68f1ee22cdafcb364841421b2b72519d3620fb7f0ce4a868dd51b30aa723814acc01e1d4e5724ba0c353c86ec0e"
+
+// Genuine signatures over intentionally-invalid payloads. Each lets the
+// corresponding negative test isolate one field binding while sig_ok stays True.
+const test_genuine_signature_wrong_user_pkh: ByteArray =
+  #"0cea27a988bde3f012716430edb596facb1ac57d8ac7c3d605548d147cf6b2b9d1d8d63112495462d3488d23b56149437b3b29a2d17b403ee76fcdc347205205"
+
+const test_genuine_signature_invalid_tier: ByteArray =
+  #"98e8d3d64deb956cfa2dabb5aaa73d598df48f8c2cb23f630d9c0c3e8d23480df1af2b294d70cf39d2c5efe9730f111747292846457794e850a676edc6775200"
+
+const test_genuine_signature_expired_ttl: ByteArray =
+  #"c9d402312f36fd66e397117a604abba8da92a39716ef16cfcf33cc8c8599b378b0d4f6d4fad4f29624df9401ed1782b7384ef4a197bff8917c64669996741e02"
+
+const test_genuine_signature_wrong_policy: ByteArray =
+  #"b7069cf3b75f228aae7fcf30156b3982e440318ab3741391fa0f82692fe3136c6597e6fd11e9dde9b036ae88a14f669eb42a62ee0c3da918fb65c47417ca1304"
+
+const test_genuine_signature_wrong_network: ByteArray =
+  #"a93c17f342e8530a0f7392f395ea45c6d9f1a4b559ddda08255853c190d31c3f588e198c8fd31cac33f543256fcf733c89bacbe5d088eec17252131a13431304"
 
 // ── Test helpers ──────────────────────────────────────────────────────────────
 
@@ -589,7 +605,7 @@ test attestation_fails_when_user_pkh_mismatch() {
       test_security_policy_id,
       test_network_id,
     ),
-    signature: test_invalid_signature,
+    signature: test_genuine_signature_wrong_user_pkh,
     issuer_vkey: test_issuer_vkey,
   }
   !verify_attestation_proof(
@@ -612,7 +628,7 @@ test attestation_fails_when_tier_is_invalid() {
       test_security_policy_id,
       test_network_id,
     ),
-    signature: test_invalid_signature,
+    signature: test_genuine_signature_invalid_tier,
     issuer_vkey: test_issuer_vkey,
   }
   !verify_attestation_proof(
@@ -635,7 +651,7 @@ test attestation_fails_when_ttl_expired() {
       test_security_policy_id,
       test_network_id,
     ),
-    signature: test_invalid_signature,
+    signature: test_genuine_signature_expired_ttl,
     issuer_vkey: test_issuer_vkey,
   }
   !verify_attestation_proof(
@@ -658,7 +674,7 @@ test attestation_fails_when_upper_bound_is_infinite() {
       test_security_policy_id,
       test_network_id,
     ),
-    signature: test_invalid_signature,
+    signature: test_genuine_signature_key_cred,
     issuer_vkey: test_issuer_vkey,
   }
   !verify_attestation_proof(
@@ -681,7 +697,7 @@ test attestation_fails_when_security_policy_mismatch() {
       wrong_policy,
       test_network_id,
     ),
-    signature: test_invalid_signature,
+    signature: test_genuine_signature_wrong_policy,
     issuer_vkey: test_issuer_vkey,
   }
   !verify_attestation_proof(
@@ -704,7 +720,7 @@ test attestation_fails_when_network_id_mismatch() {
       test_security_policy_id,
       2,
     ),
-    signature: test_invalid_signature,
+    signature: test_genuine_signature_wrong_network,
     issuer_vkey: test_issuer_vkey,
   }
   !verify_attestation_proof(
@@ -729,7 +745,7 @@ test attestation_fails_when_issuer_not_in_tel() {
       test_security_policy_id,
       test_network_id,
     ),
-    signature: test_invalid_signature,
+    signature: test_genuine_signature_key_cred,
     issuer_vkey: test_issuer_vkey,
   }
   !verify_attestation_proof(
@@ -780,7 +796,7 @@ test attestation_fails_when_credential_type_mismatches() {
       test_network_id,
       credential_type_key,
     ),
-    signature: test_invalid_signature,
+    signature: test_genuine_signature_key_cred,
     issuer_vkey: test_issuer_vkey,
   }
   !verify_attestation_proof(
@@ -806,7 +822,7 @@ test attestation_fails_when_script_payload_used_for_a_key() {
       test_network_id,
       credential_type_script,
     ),
-    signature: test_invalid_signature,
+    signature: test_genuine_signature_script_cred,
     issuer_vkey: test_issuer_vkey,
   }
   !verify_attestation_proof(
