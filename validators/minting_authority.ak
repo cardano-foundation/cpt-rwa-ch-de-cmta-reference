@@ -268,11 +268,7 @@ validator minting_authority_validator(
           // wants no CIP-68 token simply does not mint one, and this arm is
           // skipped.
           if cip68.value_has_protected(self.mint, issuance_policy_id) {
-            cip68_output_is_pinned(
-              self,
-              issuance_policy_id,
-              admin_credential_hash,
-            )?
+            cip68_output_is_pinned(self, issuance_policy_id)?
           } else {
             True
           },
@@ -555,11 +551,10 @@ fn only_permitted_assets_minted(
 ///   * that output is WELL FORMED — ADA plus exactly that one token, nothing
 ///     else co-located, and a correctly shaped CIP-68 datum
 ///     (`cip68.output_is_well_formed`); and
-///   * its owner — the inline stake credential — is the GlobalState ADMIN, so
-///     the admin is the CIP-68 metadata authority by construction. Updating the
-///     metadata is the admin spending this UTxO (base-layer owner consent) and
-///     re-outputting the token with a new datum. After `RotateAdmin` the
-///     outgoing admin hands it over with an ordinary owner transfer (README).
+///   * it has an inline owner stake credential. Updating the metadata is that
+///     owner spending this UTxO (base-layer owner consent) and re-outputting the
+///     token with a new datum. The metadata authority may be separate from the
+///     GlobalState admin; the admin still authorises registration itself.
 ///
 /// The base layer's `no_escape` already confines every token of this policy —
 /// the metadata token included — to the programmable base, so no
@@ -571,7 +566,6 @@ fn only_permitted_assets_minted(
 fn cip68_output_is_pinned(
   self: Transaction,
   issuance_policy_id: ByteArray,
-  admin_credential_hash: ByteArray,
 ) -> Bool {
   let carriers = list.filter(
     self.outputs,
@@ -579,11 +573,8 @@ fn cip68_output_is_pinned(
   )
   when carriers is {
     [output] -> {
-      expect Some(Inline(owner)) = output.address.stake_credential
-      and {
-        cip68.output_is_well_formed(output, issuance_policy_id)?,
-        (utils.credential_hash(owner) == admin_credential_hash)?,
-      }
+      expect Some(Inline(_owner)) = output.address.stake_credential
+      cip68.output_is_well_formed(output, issuance_policy_id)?
     }
     _ -> False
   }
@@ -1982,13 +1973,11 @@ fn register_structural_redeemer() -> MintingAuthorityWithdrawRedeemer {
 // these tests pin all three.
 
 /// A reference-NFT output: at the programmable base, with an owner.
-/// Owned by the GlobalState admin (`test_admin_hash`), as
-/// `reference_nft_output_is_pinned` requires.
-fn make_reference_nft_output() -> Output {
+fn make_reference_nft_output_for_owner(owner_hash: ByteArray) -> Output {
   Output {
     address: Address {
       payment_credential: Script(test_plb_hash),
-      stake_credential: Some(Inline(VerificationKey(test_admin_hash))),
+      stake_credential: Some(Inline(VerificationKey(owner_hash))),
     },
     value: merge(
       from_lovelace(2_000_000),
@@ -1997,6 +1986,10 @@ fn make_reference_nft_output() -> Output {
     datum: InlineDatum(test_cip68_datum()),
     reference_script: None,
   }
+}
+
+fn make_reference_nft_output() -> Output {
+  make_reference_nft_output_for_owner(test_admin_hash)
 }
 
 /// A correctly shaped CIP-68 datum: `Constr 0 [metadata, version, extra]`.
@@ -2066,7 +2059,7 @@ test register_mint_may_also_mint_the_cip68_reference_nft() {
 /// `register_mint_may_also_mint_the_cip68_reference_nft`, whose reference-NFT
 /// output differs from this one in exactly the stake credential
 /// (`Some(Inline(...))` there, `None` here). With no stake credential,
-/// `reference_nft_output_is_pinned`'s
+/// `cip68_output_is_pinned`'s
 /// `expect Some(Inline(_owner)) = output.address.stake_credential` traps —
 /// hence `fail`.
 test register_mint_rejects_a_reference_nft_without_stake_credential() fail {
@@ -2149,24 +2142,15 @@ test register_mint_rejects_a_reference_nft_co_located_with_supply() fail {
   )
 }
 
-/// NEGATIVE TWIN of `register_mint_may_also_mint_the_cip68_reference_nft`:
-/// the reference-NFT output differs from the positive control in exactly its
-/// inline stake credential — a non-admin key (`test_dest_stake_hash`) instead
-/// of the GlobalState admin. `reference_nft_output_is_pinned`'s owner conjunct
-/// is a plain `Bool` through `?`, so the rejection is a clean `False` — hence
-/// `!run_withdraw`, not `fail`.
-test register_mint_rejects_a_reference_nft_not_owned_by_the_admin() {
-  !run_withdraw(
+/// The metadata authority may be separate from the GlobalState admin. The admin
+/// still signs the registration, but the CIP-68 reference NFT may start at a
+/// different inline owner credential.
+test register_mint_allows_reference_nft_owned_by_metadata_authority() {
+  run_withdraw(
     register_mint_redeemer(1_000),
     register_mint_with_reference_tx(
       1,
-      Output {
-        ..make_reference_nft_output(),
-        address: Address {
-          payment_credential: Script(test_plb_hash),
-          stake_credential: Some(Inline(VerificationKey(test_dest_stake_hash))),
-        },
-      },
+      make_reference_nft_output_for_owner(test_dest_stake_hash),
     ),
   )
 }

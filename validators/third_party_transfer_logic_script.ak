@@ -1132,7 +1132,7 @@ fn p_reference_nft_input(ix: Int, owner_stake: ByteArray) -> Input {
 // `compliance.verify_parties`, and `at_least_one_seized_input`. A CIP-68 token
 // lives under the SAME issuance policy but a different asset name, so it was
 // invisible to both. A `can_force_transfer` operator could spend the
-// admin-owned metadata UTxO alongside a unit of their own dust — the dust
+// metadata UTxO alongside a unit of their own dust — the dust
 // satisfying "must actually seize something" — and re-output it to any address
 // with any datum. No admin signature, no denylist check, no KYC check.
 //

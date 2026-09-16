@@ -789,11 +789,12 @@ to all of them, and the only thing that distinguished it was an exact-name compi
 
 That produced three gaps:
 
-1. **The seizure path could take it.** A `can_force_transfer` operator could spend the admin-owned
+1. **The seizure path could take it.** A `can_force_transfer` operator could spend the CIP-68
    metadata UTxO alongside one unit of their own security-token dust — the dust satisfying "must
    actually seize something" — and re-output the token to any address with any datum. No admin
    signature, no denylist check, no KYC check, even with `requires_receiver_kyc` set. That defeats the
-   property registration establishes: the admin is the CIP-68 metadata authority by construction.
+   property registration establishes: the CIP-68 metadata token has its own owner and cannot be moved
+   through the seizure path.
 2. **"Only one metadata token" was true by accident, not by design.** With an exact-name parameter at
    most one name could ever match the metadata arm of the mint allowlist, so a second metadata token
    was unconstructible — but nothing *stated* the rule, and it would have evaporated the moment the
@@ -838,13 +839,13 @@ its quantity is exactly one — and separately counts protected entries, requiri
 prefixes, `(100)Foo` and `(100)Bar` both reach that arm, so the count has to be stated rather than
 assumed.
 
-**Rule 2 — the UTxO holds ADA plus that token, with a well-formed datum.**
+**Rule 2 — the UTxO holds ADA plus that token, with a well-formed datum and inline owner.**
 `cip68.output_is_well_formed` asserts the value structurally (`[Pair(ada, _), Pair(policy, names)]`,
 then `[Pair(name, 1)]`) and decodes the datum as `Cip68Datum` — CIP-68's `Constr 0 [metadata,
-version, extra]`. It runs at registration via `cip68_output_is_pinned`, which additionally pins the
-owner to the GlobalState admin, **and on every later move** inside `transfer_logic_script`'s existing
-output fold. That second half is what makes it an invariant: the transfer path is how a metadata
-update happens.
+version, extra]`. It runs at registration via `cip68_output_is_pinned`, which also requires an inline
+stake credential for the metadata authority, **and on every later move** inside
+`transfer_logic_script`'s existing output fold. That second half is what makes it an invariant: the
+transfer path is how a metadata update happens.
 
 **Rule 3 — seizure may not touch it.** `third_party_transfer_logic_script` refuses any transaction
 whose **inputs** carry a protected token. Inputs, not outputs, because the token can only change
@@ -1322,7 +1323,10 @@ kept, by deliberate decision, as substandard-level invariants the base layer doe
 Separately, and by independent decision rather than the review comment: the CIP-68 reference NFT must
 now be minted alone into its own UTxO, never co-located with the first supply.
 
-The same day the reference NFT's owner was pinned to the GlobalState admin credential at registration: the admin is the CIP-68 metadata authority by construction, updating the metadata is the admin's owner-consent re-output of that UTxO with a new inline datum, and after `RotateAdmin` the outgoing admin hands the NFT over with an ordinary transfer (the pin applies at registration only; the datum itself is not inspected on-chain).
+The reference NFT is no longer pinned to the GlobalState admin credential at registration. The admin
+still authorises registration, but the reference NFT's inline stake credential is the metadata
+authority. Updating the metadata is that owner's consented re-output of the UTxO with a new inline
+datum; `RotateAdmin` does not rotate metadata custody.
 
 Following the upstream review of 2026-08-21, the "no security token in this transaction" guard was
 made cheaper without changing what it accepts: it scans only the INPUTS, because every branch that
