@@ -370,27 +370,26 @@ Three rules follow, and together they are an invariant rather than a posture at 
 2. **Its UTxO holds ADA plus that token, and nothing else.** Checked when it is minted, and re-checked
    on **every later move** by the transfer logic — because the transfer path is how a metadata update
    happens. The datum must decode as CIP-68's `Constr 0 [metadata, version, extra]`; the contents are
-   not interpreted. The owner (the output's inline stake credential) must be the GlobalState admin
-   credential at registration, which is what makes the admin the metadata authority by construction.
+   not interpreted. The owner is the output's inline stake credential and may be a separate metadata
+   authority from the GlobalState admin.
 3. **The seizure path may not touch it.** A forced transfer is refused outright if any input carries a
    protected token. Seizure moves value; metadata is out of its reach, so a `can_force_transfer`
    operator cannot carry the token's metadata authority away under cover of an ordinary seizure.
 
-A metadata update is therefore the admin spending that UTxO — an ordinary CIP-113 owner-consent
-transfer — and re-outputting the token with a new inline datum, in the same shape. Updates pass
-through the transfer logic's gates, so they are blocked while transfers are paused and after
-deactivation.
+A metadata update is therefore the metadata authority spending that UTxO — an ordinary CIP-113
+owner-consent transfer — and re-outputting the token with a new inline datum, in the same shape.
+Updates pass through the transfer logic's gates, so they are blocked while transfers are paused and
+after deactivation.
 
 Operational rules:
 
 * Follow the CIP-68 label convention: `(100)` for the metadata token, `(333)` or `(444)` for the
   fungible security token. Rule 1 and the registration assertion both depend on it.
 * A deployment that wants no metadata token simply never mints one — there is nothing to configure.
-* After `RotateAdmin`, the outgoing admin hands the metadata token to the new admin with an ordinary
-  owner transfer (same address, new admin's stake credential); the owner pin applies at registration
-  only, while the shape rule keeps applying to every move.
+* `RotateAdmin` does not rotate metadata custody. If the metadata authority should change, the current
+  owner transfers the metadata token to the new authority with an ordinary owner transfer.
 * The metadata token cannot be burned. It is minted once and no branch burns it, so decommissioning
-  leaves it in the admin's custody.
+  leaves it in the metadata authority's custody.
 * On a base layer at `9db7e06` or later, its inline datum must fit `max_inline_datum_bytes` (see
   [What is delegated to the CIP-113 base layer](#what-is-delegated-to-the-cip-113-base-layer)).
 
