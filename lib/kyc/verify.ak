@@ -991,15 +991,27 @@ test membership_fails_when_pkh_mismatch() {
 
 test membership_fails_when_ttl_expired() {
   // valid_until_ms = tx_upper - 1 → tx_upper <= valid_until_ms is False
+  let expired_ttl = test_tx_upper - 1
+  let root = mpf.empty
+    |> mpf.insert(
+        membership_leaf_key(test_user_cred()),
+        membership_leaf_value(
+          expired_ttl,
+          test_security_policy_id,
+          test_network_id,
+        ),
+        [],
+      )
+    |> mpf.root()
   let proof = MembershipProof {
     pkh: test_user_pkh,
-    valid_until_ms: test_tx_upper - 1,
+    valid_until_ms: expired_ttl,
     mpf_proof: [],
   }
   !verify_membership_proof(
     proof,
     test_user_cred(),
-    test_gs_datum_with_root(#""),
+    test_gs_datum_with_root(root),
     test_security_policy_id,
     test_network_id,
     tx_with_upper_bound(test_tx_upper),
@@ -1008,6 +1020,17 @@ test membership_fails_when_ttl_expired() {
 
 test membership_fails_when_upper_bound_is_infinite() {
   // PositiveInfinity hits the `_ -> False` branch
+  let root = mpf.empty
+    |> mpf.insert(
+        membership_leaf_key(test_user_cred()),
+        membership_leaf_value(
+          test_ttl_ms,
+          test_security_policy_id,
+          test_network_id,
+        ),
+        [],
+      )
+    |> mpf.root()
   let proof = MembershipProof {
     pkh: test_user_pkh,
     valid_until_ms: test_ttl_ms,
@@ -1016,7 +1039,7 @@ test membership_fails_when_upper_bound_is_infinite() {
   !verify_membership_proof(
     proof,
     test_user_cred(),
-    test_gs_datum_with_root(#""),
+    test_gs_datum_with_root(root),
     test_security_policy_id,
     test_network_id,
     tx_with_infinite_upper(),

@@ -58,6 +58,8 @@ function rawPublicKey(privateKey) {
 function beBytes(n, width) {
   const buf = Buffer.alloc(width);
   let v = BigInt(n);
+  const max = 1n << BigInt(width * 8);
+  if (v < 0n || v >= max) throw new RangeError(`${n} does not fit in ${width} bytes`);
   for (let i = width - 1; i >= 0; i -= 1) {
     buf[i] = Number(v & 0xffn);
     v >>= 8n;
