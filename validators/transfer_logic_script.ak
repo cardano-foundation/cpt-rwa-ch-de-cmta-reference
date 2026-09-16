@@ -892,6 +892,20 @@ test transfer_rejected_when_genuine_proof_but_issuer_not_in_tel() {
   )
 }
 
+test transfer_rejects_swapped_genuine_attestation_proofs() {
+  let trusted_keys = t_tel_with(t_kyc_issuer_vkey)
+  let source_action = t_source_action_with_proof(
+    t_genuine_proof(t_dest_kyc_payload, t_dest_kyc_signature),
+  )
+  let dest_action = t_dest_action_with_proof(
+    t_genuine_proof(t_sender_kyc_payload, t_sender_kyc_signature),
+  )
+  !run_transfer(
+    t_redeemer_with(source_action, dest_action),
+    t_transfer_tx_with_tel(True, True, trusted_keys),
+  )
+}
+
 // ============================================================================
 // Membership KYC end-to-end
 // ============================================================================
