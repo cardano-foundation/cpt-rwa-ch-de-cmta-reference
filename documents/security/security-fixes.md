@@ -781,7 +781,7 @@ seizure hole was one symptom of the underlying shape.
 
 ### What was wrong
 
-Every compliance scan in this substandard is scoped to `security_asset_name` — the destination folds
+Every compliance scan in this module is scoped to `security_asset_name` — the destination folds
 that feed `compliance.verify_parties`, `at_least_one_seized_input`, the mint destination walk. A
 CIP-68 token lives under the **same issuance policy** but a different asset name, so it was invisible
 to all of them, and the only thing that distinguished it was an exact-name compile-time parameter,
@@ -1043,7 +1043,7 @@ what a redeploy onto that base would have to account for:
 * **A new trust dependency, and it is worth stating plainly.** `coordination_spend` lets whoever
   holds `upgrade_cred` rewrite those three delegate credentials in place, subject only to a 28-byte
   shape check. A rewrite pointing `transfer_cred` or `third_party_cred` at a permissive stub would
-  bypass this substandard's transfer and seizure gates entirely, in one transaction, with nothing on
+  bypass this module's transfer and seizure gates entirely, in one transaction, with nothing on
   this side able to detect or resist it. **Record who holds that authority for the target
   deployment** (script, signers, threshold) and treat any change to the coordination datum as a
   security event. See [what is still open](#what-is-still-open).
@@ -1231,7 +1231,7 @@ Grant the two roles together to whoever is expected to perform court- or regulat
   in defect 11, for all five roles, after every grant and rotation.
 - **The CIP-113 coordination UTxO's upgrade authority is part of this token's trust boundary.**
   Whoever holds `upgrade_cred` can re-point the base layer's `transfer_cred`, `third_party_cred` and
-  `unfracking_cred` at scripts of their choosing, which would bypass every gate in this substandard
+  `unfracking_cred` at scripts of their choosing, which would bypass every gate in this module
   at once. Nothing on this side can detect or resist it. Record the authority (script, signers,
   threshold) for the target network alongside the deployment parameters, and monitor the
   coordination datum for changes. Identified in the 2026-08-28 re-audit.
@@ -1318,7 +1318,7 @@ belt-and-braces re-check that a registry-node spend mints or burns no supply was
 instead on `registry_spend`'s own guarantee (see the "A registry-node spend can never mint or burn
 that node's own token" row in the same table). The same review comment's other two recommendations —
 the list-integrity checks (group C) and the GlobalState/denylist pins (group D) — were reviewed and
-kept, by deliberate decision, as substandard-level invariants the base layer does not itself provide.
+kept, by deliberate decision, as module-level invariants the base layer does not itself provide.
 Separately, and by independent decision rather than the review comment: the CIP-68 reference NFT must
 now be minted alone into its own UTxO, never co-located with the first supply.
 
