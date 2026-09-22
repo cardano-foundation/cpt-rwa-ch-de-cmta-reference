@@ -51,6 +51,30 @@ A third-party equivalency assessment of this codebase is maintained at [CMTA/CMT
 
 ---
 
+## What the modules do
+
+This repository supplies the token-specific rules around a deployed CIP-113 programmable-token
+base layer. The base layer holds the tokens and dispatches to the logic scripts; it is not included
+in this repository. The German and Swiss profiles use the same validators.
+
+| Module | Responsibility |
+|---|---|
+| [`validators/global_state.ak`](validators/global_state.ak) | Mints the one-shot GlobalState NFT at genesis and controls the continuing state UTxO: remaining mintable supply, pause, KYC settings, trusted issuers, admin rotation, upgrades and deactivation. |
+| [`validators/power_users.ak`](validators/power_users.ak) | Maintains the operator linked list. The GlobalState admin grants or changes the five independent role flags. |
+| [`validators/denylist.ak`](validators/denylist.ak) | Maintains the sanctions linked list. An `is_admin` power user can add or remove an entry; presence means sanctioned. |
+| [`validators/minting_logic_script.ak`](validators/minting_logic_script.ak) | Permanent CIP-113 minting proxy. It reads GlobalState and requires the currently named minting authority to run; its hash defines this token's issuance policy. |
+| [`validators/minting_authority.ak`](validators/minting_authority.ak) | Replaceable authority for registration, mint, burn and registry-node upgrades. It checks supply-changing transactions against roles, destinations, the denylist and KYC. |
+| [`validators/transfer_logic_script.ak`](validators/transfer_logic_script.ak) | Checks ordinary transfers for pause, deactivation, sender and receiver denylist absence, and enabled KYC gates. |
+| [`validators/third_party_transfer_logic_script.ak`](validators/third_party_transfer_logic_script.ak) | Checks forced transfers: `can_force_transfer` authority and vetted destinations, while allowing a sanctioned or expired source and remaining available during a pause. |
+| [`lib/types/`](lib/types/) | On-chain datum and redeemer schemas consumed by transaction builders, including GlobalState, operator roles and KYC proofs. |
+| [`lib/kyc/verify.ak`](lib/kyc/verify.ak), [`lib/denylist/absence.ak`](lib/denylist/absence.ak), [`lib/compliance.ak`](lib/compliance.ak) | Verify attestations or membership proofs, prove denylist absence using a covering node, and apply those checks to each party. |
+| [`lib/cip68.ak`](lib/cip68.ak), [`lib/constants.ak`](lib/constants.ak), [`lib/utils.ak`](lib/utils.ak) | Enforce metadata-token shape and provide shared protocol constants and transaction helpers. |
+
+For transaction inputs, withdrawals and redeemer examples, see the
+[practical integration guide](documents/integration-guide.md).
+
+---
+
 ## Technical compliance status
 
 The mandatory enforcement core is implemented and covered by the test suite: KYC-gated transfers
@@ -174,6 +198,34 @@ referenced by compact identifiers or hashes.
   denylist. It is reversible in one transaction. If you want separation of duties here, that is a
   policy decision to make before launch.
 
+### Upgrading and locking the rules
+
+The GlobalState admin has two distinct upgrade paths while `upgrades_locked` is false:
+
+* `RotateMintingScript` changes `minting_script_credential_hash` in GlobalState. The permanent
+  minting proxy then requires the replacement authority's withdraw-0. The proxy checks delegation,
+  not the new authority's mint, burn or registration rules; review and test the replacement before
+  rotating. Register its stake credential before the first withdrawal. The outgoing authority does
+  not have to consent.
+* `UpgradeRegistryNode` changes this token's CIP-113 transfer and/or third-party transfer logic
+  credentials in its registry node. The admin signs and the minting authority verifies the
+  continuing node. The minting proxy, GlobalState policy and disabled unfracking hook stay pinned;
+  an upgrade cannot mint or burn this token in the same transaction. Register replacement logic
+  stake credentials before use.
+
+`LockUpgrades` is an admin-signed, one-way GlobalState action that closes **both** paths for later
+transactions. It does not deactivate transfers, minting or burning. If a registry upgrade is bundled
+with the lock in one transaction, the upgrade reads the pre-lock GlobalState input and can still
+succeed; audit the whole transaction when deciding which rules were locked. The same pre-state rule
+applies to a registry upgrade bundled with admin rotation or deactivation.
+
+The active authority and role credentials are part of the deployment's trust boundary. At genesis,
+after each authority rotation, and after granting or rotating an operator role, test that an action
+without that role's authorised signature is rejected. A permissive script credential used as a role
+or minting authority can silently weaken the checks. See the
+[integration guide](documents/integration-guide.md#upgrades-and-operator-checks) for an operator
+checklist.
+
 ## Building the scripts
 
 Requires Aiken **v1.1.23**, pinned in [`aiken.toml`](aiken.toml) and matched by CI.
@@ -264,7 +316,7 @@ enough to inline but is simplest to publish alongside them. The two list `mint` 
 (~4.7–5.2 KB) should in practice be treated the same way.
 
 All four withdraw-0 scripts need their **stake credential registered** on chain before the first
-transaction that names them in `withdrawals` — see step 4 of [Initialising a token](#initialising-a-token).
+transaction that names them in `withdrawals` — see step 2 of [Initialising a token](#initialising-a-token).
 A withdrawal from an unregistered credential is rejected by the ledger at phase 1, before any script
 runs, so forgetting the proxy's registration makes every mint and burn fail from genesis on.
 
@@ -490,31 +542,35 @@ which key to deduplicate on.
 
 ## Initialising a token
 
-Genesis is a short sequence of transactions. They can be submitted one at a time or built as a
-deterministic chain and signed in a single batch.
+Genesis is a short sequence of transactions. Apply the parameters first, then submit each
+dependent transaction after the preceding output is available.
 
-1. **Create GlobalState** — spend the genesis UTxO and mint the GlobalState NFT into a new UTxO
-   carrying the initial datum: admin credential, supply cap, the two linked-list policy IDs, KYC
-   flags, trusted entity keys, and the target network ID.
-2. **Register in the CIP-113 registry** — insert a registry node keyed by the issuance policy ID,
-   recording the minting, transfer and third-party transfer logic scripts plus the GlobalState
-   policy. Nothing validates until this node exists.
-3. **Initialise the linked lists** — mint the root node of the power-users list and of the denylist
-   (one transaction each).
-4. **Register the logic scripts' stake credentials** — all **four** withdraw-0 validators are
-   invoked as zero-value withdrawals, so each one's stake credential must be registered before any
-   transfer, mint or burn can reference it: the minting proxy `minting_logic_validator`,
-   `minting_authority_validator`, `transfer_logic_validator` and
-   `third_party_transfer_logic_validator`. Mint and burn need the first two (the proxy's
-   withdraw-0 requires the authority's); transfers need the third; seizures the fourth. A
-   withdrawal from an unregistered credential fails at ledger phase 1 — before any validator runs —
-   so a missing registration surfaces as every such transaction being rejected, not as a script
-   error. Each of these validators' `publish` handler accepts only `RegisterCredential`, so the
-   registration can never be undone by a third party.
-5. **Assign power users** — insert one node per operator, with the role flags that operator should
-   hold.
-6. **Mint the initial supply** — spends GlobalState to decrement the cap and mints under the
-   issuance policy to holders that pass the denylist and KYC gates.
+1. **Create GlobalState and both linked-list roots in one transaction.** Spend the three reserved
+   one-shot inputs and mint the GlobalState NFT, power-users root NFT and denylist root NFT
+   together. The GlobalState mint validator rejects genesis unless both root policies mint in this
+   same transaction. Put the GlobalState NFT at `global_state_spend_validator` with an inline datum
+   containing the admin credential, supply cap, list policy IDs, KYC flags, trusted entity keys,
+   network ID, initial minting-authority hash and `upgrades_locked = False`. Put each root at its
+   own list spend validator. Verify all three addresses off-chain before signing; their mint
+   validators cannot pin the corresponding spend addresses at genesis.
+2. **Register the logic scripts' stake credentials.** Register the minting proxy
+   `minting_logic_validator` and current `minting_authority_validator` **before** the CIP-113
+   registration, which invokes both as zero-value withdrawals. Register
+   `transfer_logic_validator` and `third_party_transfer_logic_validator` before their first use.
+   An unregistered withdrawal fails at ledger phase 1. Each script's `publish` handler accepts
+   `RegisterCredential` and rejects deregistration.
+3. **Assign power users** by inserting one node per operator, with the role flags needed for later
+   actions. A `can_mint` operator must exist before a registration that mints initial supply.
+4. **Register in the CIP-113 registry.** Insert the node keyed by the issuance policy ID, naming
+   the proxy, transfer and third-party transfer logic scripts and the GlobalState policy. Use
+   `RegisterStructural` with no issuance-policy mint, or use `RegisterMint` if minting the initial
+   supply in this transaction.
+5. **Mint the initial supply**, unless it was minted with `RegisterMint` in step 4. `MintBurn`
+   spends GlobalState to decrement the cap and mints to destinations that pass the denylist and
+   enabled KYC gates.
+
+For the exact transaction shapes and index fields, follow the
+[practical integration guide](documents/integration-guide.md#bootstrap-a-token).
 
 From there the protocol is live: mint and burn, pause and unpause, force transfers, verify or
 denylist holders, and add or modify power users.

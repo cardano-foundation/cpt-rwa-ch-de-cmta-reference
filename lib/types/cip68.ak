@@ -13,7 +13,7 @@ pub type Cip68Datum {
   /// Issuer-defined metadata map. CBOR map; contents not interpreted here.
   metadata: Pairs<Data, Data>,
   /// CIP-68 datum version. Not pinned to a value: a future version must be
-  /// able to ship without a redeploy of this substandard.
+  /// able to ship without a redeploy of this module.
   version: Int,
   /// Reserved by CIP-68 for future extension.
   extra: Data,

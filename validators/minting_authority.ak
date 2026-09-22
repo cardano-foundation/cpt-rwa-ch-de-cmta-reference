@@ -470,7 +470,7 @@ validator minting_authority_validator(
 /// Checked as a SHAPE, not a sum: `quantity_of_policy_id(...) == 0` would also
 /// accept +N of the security asset netted against -N of another name under the
 /// same policy. `issuance_mint` constrains no asset names — it delegates
-/// entirely to this substandard — so a second name is possible, and it would be
+/// entirely to this module — so a second name is possible, and it would be
 /// invisible to the destination checks below, which only ever inspect outputs
 /// carrying `security_asset_name`.
 ///
@@ -589,7 +589,7 @@ fn cip68_output_is_pinned(
 /// (`is_programmable_token_id_valid`), so the policy id cannot lie about which
 /// minting logic governs it. It binds NOTHING about `transfer_logic_script`,
 /// `third_party_transfer_logic_script`, `unfracking_logic_script` or
-/// `global_state_cs` — those are free fields, and this substandard's consent
+/// `global_state_cs` — those are free fields, and this module's consent
 /// is the only thing standing between an attacker and a registration naming
 /// permissive logic scripts, which would bypass every compliance gate from
 /// genesis.
