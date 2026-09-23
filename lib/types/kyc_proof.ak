@@ -42,9 +42,17 @@ pub type MembershipProof {
   mpf_proof: Proof,
 }
 
+/// Raw hex-decoded bytes returned by CIP-30 `signData`. The verifier parses
+/// both COSE objects on-chain and retains the exact signed protected header.
+pub type Cip30AttestationProof {
+  cose_sign1: ByteArray,
+  cose_key: ByteArray,
+}
+
 pub type KycProof {
   Attestation { kyc_proof: AttestationProof }
   Membership { membership_proof: MembershipProof }
+  Cip30Attestation { cip30_proof: Cip30AttestationProof }
 }
 
 pub const payload_length: Int = 67

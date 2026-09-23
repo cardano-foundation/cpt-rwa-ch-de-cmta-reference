@@ -306,9 +306,9 @@ exact order the blueprint (`plutus.json`) declares them; apply top to bottom.
 ### Deployment: reference scripts
 
 Four validators are withdraw-0 scripts, i.e. they run as zero-value withdrawals rather than as the
-spending or minting script of any UTxO: `transfer_logic_validator` (~6.1 KB, every transfer),
-`third_party_transfer_logic_validator` (~6.7 KB, every seizure), `minting_authority_validator`
-(~8.4 KB, every mint and burn) and the minting proxy `minting_logic_validator` (~1.1 KB, also every
+spending or minting script of any UTxO: `transfer_logic_validator` (~10.1 KB, every transfer),
+`third_party_transfer_logic_validator` (~10.3 KB, every seizure), `minting_authority_validator`
+(~12.7 KB, every mint and burn) and the minting proxy `minting_logic_validator` (~1.1 KB, also every
 mint and burn — the proxy's withdraw-0 is what the CIP-113 registry node invokes, and it in turn
 requires the authority's). The three large ones must be published once as reference-script UTxOs and
 supplied via reference inputs — not inlined (a transaction is capped at 16 KiB); the proxy is small
@@ -460,10 +460,34 @@ binding axis**.
   dedupe check adds a small quadratic term that matters only beyond ~20 parties per side.
 * **Attestation KYC** adds ≈ 0.06 M mem / 74 M CPU per vetted party (one Ed25519 verification);
   membership (MPF) proofs are cheaper.
+* **CIP-30 trusted-issuer attestation**, with one sender or receiver proof on
+  the same transfer fixture, measured 943,339 mem / 337,592,219 CPU versus
+  641,503 mem / 246,082,766 CPU for the raw Ed25519 attestation. The added
+  COSE validation costs 301,836 mem / 91,509,453 CPU in this fixture.
+  Streaming header decoding reduced the CIP-30 transfer path from the initial
+  1,650,216 mem / 598,148,445 CPU to 1,023,520 mem / 362,232,363 CPU.
+  Specializing the fixed-length COSE fields reduced it further to the current
+  numbers above, without changing the accepted COSE profile. The direct COSE
+  verifier's genuine proof test now uses 317,219 mem / 149,445,947 CPU, down
+  from 397,500 mem / 174,102,091 CPU before this specialization.
+  [`scripts/cip30-test-vectors.mjs`](scripts/cip30-test-vectors.mjs) serializes
+  equivalent standalone `KycProof` values as Plutus Data: 241 bytes for
+  CIP-30 versus 175 bytes for raw attestation, a **66-byte transaction-size
+  contribution per proof**. This is not a full assembled transaction size;
+  transaction witnesses, inputs, outputs and the enclosing redeemer also
+  contribute bytes. At the same source revision, the unapplied blueprint
+  scripts grew from 6,396 to 9,953 bytes (transfer), 6,652 to 10,210 bytes
+  (forced transfer), and 8,916 to 12,486 bytes (minting authority) relative
+  to the parent revision. The fixed-length specialization reduced those three
+  scripts by another 114, 113 and 186 bytes respectively. Measurements use
+  Aiken v1.1.23 and the genuine sender/receiver positive tests in
+  `validators/transfer_logic_script.ak`.
 * **Forced transfer** ≈ 0.60 M mem / 0.18 G CPU with one destination, ≈ 0.10 M mem / 32 M CPU per
   further destination sharing a node.
-* **Redeemer size** ≈ 32 B per party without KYC, ≈ 370 B per party with attestation proofs — the
-  16 KiB transaction limit binds near 40 attested parties.
+* **Redeemer size** ≈ 32 B per party without KYC, ≈ 370 B per party with raw
+  attestation proofs. A CIP-30 proof adds 66 B per vetted party in the measured
+  standalone proof encoding; the 16 KiB transaction limit therefore binds
+  earlier for CIP-30-heavy transfers.
 
 `aiken bench -m "transfer_logic_script.{..}" --max-size 40` scales linearly in `n` on both benches
 (`transfer_cost_by_party_count`: `n` senders + `n` destinations, denylist-only, root-only covering
