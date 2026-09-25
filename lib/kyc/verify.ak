@@ -10,16 +10,67 @@ use aiken/primitive/bytearray
 use cardano/address.{Credential, Script, VerificationKey}
 use cardano/assets
 use cardano/transaction.{Transaction}
+use kyc/cose
 use types/global_state.{GlobalStateDatum}
 use types/kyc_proof.{
-  Attestation, AttestationProof, KycProof, Membership, MembershipProof,
-  credential_type_key, credential_type_script, issuer_vkey_length,
-  offset_credential_type, offset_network_id, offset_security_policy_id,
-  offset_user_kyc_tier, offset_user_pkh, offset_valid_until_ms, payload_length,
-  signature_length, tier_invalid, width_security_policy_id, width_user_pkh,
-  width_valid_until_ms,
+  Attestation, AttestationProof, Cip30Attestation, Cip30AttestationProof,
+  KycProof, Membership, MembershipProof, credential_type_key,
+  credential_type_script, issuer_vkey_length, offset_credential_type,
+  offset_network_id, offset_security_policy_id, offset_user_kyc_tier,
+  offset_user_pkh, offset_valid_until_ms, payload_length, signature_length,
+  tier_invalid, width_security_policy_id, width_user_pkh, width_valid_until_ms,
 }
 use utils
+
+/// The shared, signed 67-byte claim. Both raw Ed25519 and CIP-30 attestations
+/// must bind exactly the same holder, policy, network and validity deadline.
+pub fn verify_payload(
+  payload: ByteArray,
+  expected_credential: Credential,
+  security_policy_id: ByteArray,
+  network_id: Int,
+  tx: Transaction,
+) -> Bool {
+  if bytearray.length(payload) != payload_length {
+    False
+  } else {
+    let payload_user_pkh = bytearray.slice(
+      payload,
+      offset_user_pkh,
+      offset_user_pkh + width_user_pkh - 1,
+    )
+    let payload_tier = builtin.index_bytearray(payload, offset_user_kyc_tier)
+    let payload_ttl = bytearray.to_int_big_endian(
+      bytearray.slice(
+        payload,
+        offset_valid_until_ms,
+        offset_valid_until_ms + width_valid_until_ms - 1,
+      ),
+    )
+    let payload_policy = bytearray.slice(
+      payload,
+      offset_security_policy_id,
+      offset_security_policy_id + width_security_policy_id - 1,
+    )
+    let payload_network = builtin.index_bytearray(payload, offset_network_id)
+    let payload_credential_type = builtin.index_bytearray(
+      payload,
+      offset_credential_type,
+    )
+    let ttl_ok = when tx.validity_range.upper_bound.bound_type is {
+      Finite(tx_upper) -> tx_upper <= payload_ttl
+      _ -> False
+    }
+    and {
+      payload_user_pkh == utils.credential_hash(expected_credential),
+      payload_credential_type == utils.credential_type_byte(expected_credential),
+      payload_tier != tier_invalid,
+      ttl_ok,
+      payload_policy == security_policy_id,
+      payload_network == network_id,
+    }
+  }
+}
 
 /// Verify a KYC proof for a specific expected PKH + security token + network.
 ///
@@ -57,53 +108,14 @@ pub fn verify_attestation_proof(
     bytearray.length(issuer_vkey) == issuer_vkey_length,
   }
 
-  // 2–6. Payload field checks (guarded).
-  let fields_ok = if lengths_ok {
-    // bytearray.slice takes (start, end_inclusive), so end = start+width-1.
-    let payload_user_pkh = bytearray.slice(
-      payload,
-      offset_user_pkh,
-      offset_user_pkh + width_user_pkh - 1,
-    )
-    let payload_tier = builtin.index_bytearray(payload, offset_user_kyc_tier)
-    let payload_ttl = bytearray.to_int_big_endian(
-      bytearray.slice(
-        payload,
-        offset_valid_until_ms,
-        offset_valid_until_ms + width_valid_until_ms - 1,
-      ),
-    )
-    let payload_policy = bytearray.slice(
-      payload,
-      offset_security_policy_id,
-      offset_security_policy_id + width_security_policy_id - 1,
-    )
-    let payload_network = builtin.index_bytearray(payload, offset_network_id)
-    // The credential constructor the attestation was issued for.
-    let payload_credential_type = builtin.index_bytearray(
-      payload,
-      offset_credential_type,
-    )
-
-    let ttl_ok = when tx.validity_range.upper_bound.bound_type is {
-      Finite(tx_upper) -> tx_upper <= payload_ttl
-      _ -> False
-    }
-
-    and {
-      payload_user_pkh == utils.credential_hash(expected_credential),
-      // A key credential and a script credential sharing a hash are
-      // DIFFERENT holders — the base layer authorises them differently — so an
-      // attestation must name which one it was issued for.
-      payload_credential_type == utils.credential_type_byte(expected_credential),
-      payload_tier != tier_invalid,
-      ttl_ok,
-      payload_policy == security_policy_id,
-      payload_network == network_id,
-    }
-  } else {
-    False
-  }
+  // 2–6. Shared payload rules; length is checked before any field access.
+  let fields_ok = verify_payload(
+    payload,
+    expected_credential,
+    security_policy_id,
+    network_id,
+    tx,
+  )
 
   // 7. Issuer membership in TEL.
   let issuer_ok = pairs.has_key(gs_datum.trusted_entity_vkeys, issuer_vkey)
@@ -121,6 +133,38 @@ pub fn verify_attestation_proof(
     fields_ok,
     issuer_ok,
     sig_ok,
+  }
+}
+
+/// Verify a wallet-produced CIP-30 COSE_Sign1 / COSE_Key pair. `cose.verify`
+/// authenticates the signed bytes, issuer address and trusted key before the
+/// shared KYC claim checks run. A holder wallet is insufficient unless its key
+/// has independently been added to the trusted-issuer list.
+pub fn verify_cip30_attestation_proof(
+  proof: Cip30AttestationProof,
+  expected_credential: Credential,
+  gs_datum: GlobalStateDatum,
+  security_policy_id: ByteArray,
+  network_id: Int,
+  tx: Transaction,
+) -> Bool {
+  when
+    cose.verify(
+      proof.cose_sign1,
+      proof.cose_key,
+      gs_datum.trusted_entity_vkeys,
+      network_id,
+    )
+  is {
+    Some(payload) ->
+      verify_payload(
+        payload,
+        expected_credential,
+        security_policy_id,
+        network_id,
+        tx,
+      )
+    None -> False
   }
 }
 
@@ -253,6 +297,15 @@ pub fn verify_kyc_proof(
     Membership { membership_proof } ->
       verify_membership_proof(
         membership_proof,
+        expected_credential,
+        gs_datum,
+        security_policy_id,
+        network_id,
+        tx,
+      )
+    Cip30Attestation { cip30_proof } ->
+      verify_cip30_attestation_proof(
+        cip30_proof,
         expected_credential,
         gs_datum,
         security_policy_id,
@@ -1261,6 +1314,117 @@ test kyc_proof_routes_membership_variant_and_accepts_a_genuine_proof() {
     proof,
     test_user_cred(),
     test_gs_datum_with_root(root),
+    test_security_policy_id,
+    test_network_id,
+    tx_with_upper_bound(test_tx_upper),
+  )
+}
+
+// Genuine CIP-30 fixtures from scripts/cip30-test-vectors.mjs.
+const test_cip30_key: ByteArray =
+  #"a401010327200621582003a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8"
+
+const test_cip30_unit_valid: ByteArray =
+  #"84582aa201276761646472657373581d6027e38d0e19e3434e33fbd001d3fe04b5b76763f88acd625e0d770b43a166686173686564f45843aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa010000000005f5e100bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb01005840b98e5f45c6b54500cf64d816928f8bd81ec095d85c12e642c4204325df16f06943e6d8a1ae82796f4dd91fe71caa31e7e2cf5356b7a96d7ba1a1bd10482b2b06"
+
+const test_cip30_invalid_tier: ByteArray =
+  #"84582aa201276761646472657373581d6027e38d0e19e3434e33fbd001d3fe04b5b76763f88acd625e0d770b43a166686173686564f45843aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa000000000005f5e100bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb0100584079f95df2f99f53cfe62b35da88e4cba63c9ff5a764d4ec5d20c0266c90d1832ea102a23979291797eb281e72c888e1d1952fac5d50b0e0a49ccf2c1df0d1b30e"
+
+const test_cip30_expired: ByteArray =
+  #"84582aa201276761646472657373581d6027e38d0e19e3434e33fbd001d3fe04b5b76763f88acd625e0d770b43a166686173686564f45843aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa010000000002faf07fbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb0100584022db94609086fae5f1964e9e0c63c4551fbb919f8b1a1e5cbbdb2a341870604f1de5cce624d7a8ff058ca56f48c0c60203d98aed87203da80ea237c8470ae10c"
+
+const test_cip30_wrong_holder: ByteArray =
+  #"84582aa201276761646472657373581d6027e38d0e19e3434e33fbd001d3fe04b5b76763f88acd625e0d770b43a166686173686564f45843dddddddddddddddddddddddddddddddddddddddddddddddddddddddd010000000005f5e100bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb01005840eefa4f374897f19632b974b02346c80843b2300c38f72b134e9ab38d792e0cc198f03422411d9636b6ec59b91dff51cc7fca3e242dc345ad1b674d7aaf20770c"
+
+const test_cip30_wrong_policy: ByteArray =
+  #"84582aa201276761646472657373581d6027e38d0e19e3434e33fbd001d3fe04b5b76763f88acd625e0d770b43a166686173686564f45843aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa010000000005f5e100ffffffffffffffffffffffffffffffffffffffffffffffffffffffff01005840047d304d3198fde7a4435ed8c9db6a0025248c69de99edffa2696a291d741a361cd89d326cd3c4fb45651cff3ff272bd95954b5d2ad10be5aaf2b9d9365f200c"
+
+const test_cip30_wrong_kyc_network: ByteArray =
+  #"84582aa201276761646472657373581d6027e38d0e19e3434e33fbd001d3fe04b5b76763f88acd625e0d770b43a166686173686564f45843aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa010000000005f5e100bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb020058408681b8455b0fc5eda9f66938daca961e66abd50718b4ac22bdd607f1555aeff037439548801476c00e1e7cfaf6aae2a8d5048739603e584ea39512fdc0e8080b"
+
+const test_cip30_wrong_credential_type: ByteArray =
+  #"84582aa201276761646472657373581d6027e38d0e19e3434e33fbd001d3fe04b5b76763f88acd625e0d770b43a166686173686564f45843aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa010000000005f5e100bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb0101584059b8cf37eb530f20b11e6f423303471088222779586f6463ebc0df361b4e5386dd4da22dad8e93b90201e832abe11381f75dc21377a35a9bc23b02916ec97708"
+
+fn test_cip30_proof(sign1: ByteArray) -> KycProof {
+  Cip30Attestation {
+    cip30_proof: Cip30AttestationProof {
+      cose_sign1: sign1,
+      cose_key: test_cip30_key,
+    },
+  }
+}
+
+test cip30_dispatch_accepts_genuine_trusted_issuer_claim() {
+  verify_kyc_proof(
+    test_cip30_proof(test_cip30_unit_valid),
+    test_user_cred(),
+    test_gs_datum_with_tel(test_tel()),
+    test_security_policy_id,
+    test_network_id,
+    tx_with_upper_bound(test_tx_upper),
+  )
+}
+
+test cip30_rejects_signed_invalid_tier() {
+  !verify_kyc_proof(
+    test_cip30_proof(test_cip30_invalid_tier),
+    test_user_cred(),
+    test_gs_datum_with_tel(test_tel()),
+    test_security_policy_id,
+    test_network_id,
+    tx_with_upper_bound(test_tx_upper),
+  )
+}
+
+test cip30_rejects_signed_expired() {
+  !verify_kyc_proof(
+    test_cip30_proof(test_cip30_expired),
+    test_user_cred(),
+    test_gs_datum_with_tel(test_tel()),
+    test_security_policy_id,
+    test_network_id,
+    tx_with_upper_bound(test_tx_upper),
+  )
+}
+
+test cip30_rejects_signed_wrong_holder() {
+  !verify_kyc_proof(
+    test_cip30_proof(test_cip30_wrong_holder),
+    test_user_cred(),
+    test_gs_datum_with_tel(test_tel()),
+    test_security_policy_id,
+    test_network_id,
+    tx_with_upper_bound(test_tx_upper),
+  )
+}
+
+test cip30_rejects_signed_wrong_policy() {
+  !verify_kyc_proof(
+    test_cip30_proof(test_cip30_wrong_policy),
+    test_user_cred(),
+    test_gs_datum_with_tel(test_tel()),
+    test_security_policy_id,
+    test_network_id,
+    tx_with_upper_bound(test_tx_upper),
+  )
+}
+
+test cip30_rejects_signed_wrong_kyc_network() {
+  !verify_kyc_proof(
+    test_cip30_proof(test_cip30_wrong_kyc_network),
+    test_user_cred(),
+    test_gs_datum_with_tel(test_tel()),
+    test_security_policy_id,
+    test_network_id,
+    tx_with_upper_bound(test_tx_upper),
+  )
+}
+
+test cip30_rejects_signed_wrong_credential_type() {
+  !verify_kyc_proof(
+    test_cip30_proof(test_cip30_wrong_credential_type),
+    test_user_cred(),
+    test_gs_datum_with_tel(test_tel()),
     test_security_policy_id,
     test_network_id,
     tx_with_upper_bound(test_tx_upper),
