@@ -1,6 +1,6 @@
-# Programmable asset tokens on Cardano — German and Swiss profiles
+# Programmable asset tokens on Cardano based on the CMTA framework
 
-Aiken (Plutus V3) contracts providing on-chain primitives for programmable asset tokens   designed as reference profiles for use cases based on the CMTA framework and supporting the implementation of Swiss and German legal requirements. The primitives include KYC-gated transfers, denylisting, global pause, forced transfers and seizures, supply caps, role-based permissions, and an irreversible decommission mechanism.
+Aiken (Plutus V3) contracts providing on-chain primitives for programmable asset tokens   designed as reference profiles for use cases based on the CMTA framework and supporting the implementation of Swiss legal requirements. The primitives include KYC-gated transfers, denylisting, global pause, forced transfers and seizures, supply caps, role-based permissions, and an irreversible decommission mechanism.
 
 The contracts build on CIP-113 (programmable tokens) by Michele Nuzzi, Matteo Coppola, Giovanni Gargiulo and Philip Di Sarro: [CIP-113](https://github.com/HarmonicLabs/CIPs/blob/master/CIP-0113/README.md) 
 
@@ -8,41 +8,14 @@ The contracts build on CIP-113 (programmable tokens) by Michele Nuzzi, Matteo Co
 
 ## Important note and disclaimer
 
-The profiles draw on relevant Swiss and German legal requirements, including the Swiss framework for ledger-based securities according to the Swiss Code of Obligation (**Obligationenrecht; OR**) and the German framework for electronic securities according to the German Electronic Securities Act (**Gesetz über elektronische Wertpapiere; eWpG**), as well as technical standards and functional requirements developed by CMTA. 
+The proposed profile draws on relevant Swiss requirements, translated technical standards and functional requirements developed by CMTA. 
 
-The profiles provide technical functionality only and are intended to support the implementation of certain features that may be relevant for legal or regulatory compliance under a certain jurisdiction. Its use does not imply, establish, or ensure compliance with any applicable legal or regulatory requirements. Each user is solely responsible for assessing the legal and regulatory implications of their specific implementation and/or use case and for ensuring it meets legal and regulatory requirements. It is strongly recommended to obtain appropriate professional advice where necessary.
+The profile provides technical functionality only and is intended to support the implementation of certain features that may be relevant for legal or regulatory compliance under a certain jurisdiction. Its use does not imply, establish, or ensure compliance with any applicable legal or regulatory requirements. Each user is solely responsible for assessing the legal and regulatory implications of their specific implementation and/or use case and for ensuring it meets legal and regulatory requirements. It is strongly recommended to obtain appropriate professional advice where necessary.
 
 
 ---
 
-## The two profiles
-
-Both profiles are supported by **a shared set of contracts**, rather than separate codebases, reflecting the substantial overlap in the relevant on-chain functionality. What differs is only the metadata schema and which behaviours are mandatory.
-
-
-### German profile
-
-Reflects technical requirements and functionalities relevant under the German eWpG. Where applicable, the relevant register is maintained  under the responsibility of a duly authorized registrar (**registerführende Stelle**); the contracts are intended to serve as the technical register layer that provides the on-chain functionality supporting such a register. Relevant features addressed on-chain include:
-
-* **Tamper-evident, chronological record of state changes** — every transfer, mint, freeze, role
-  change and metadata update is a ledger transaction, ordered and immutable once settled.
-* **Enforcement of disposal restrictions** — transfers are validated against on-chain KYC status
-  and denylist entries before they can settle; unauthorised transfers cannot be constructed.
-* **Per-holder and global freezing** — denylist entries block send *and* receive; the pause flag
-  halts standard transfers globally.
-* **Role-based access control** — registrar/issuer/compliance functions are split across
-  separately assignable power-user roles (see [Actors](#actors)).
-* **Holder identification** — holders are recorded on-chain by credential hash in a linked list,
-  which a registrar maps 1:1 to identities verified off-chain.
-* **Forced transfer / seizure** — an authorised role can move tokens to a verified, non-denylisted
-  address for regulatory enforcement or corporate actions.
-* **Securities metadata** — a `SecurityInfo` schema covering ISIN, terms of issue, issuer details,
-  nominal amount, volume of issuance, register and custodian references
-  ([`lib/types/security/bafin.ak`](lib/types/security/bafin.ak)).
-
-Certain requirements remain outside the scope of this technical layer and need to be addressed off-chain. This includes specific publication and notification requirements as per the eWpG, which are not fulfilled through on-chain metadata, as well as KYC/AML processes and identity verification. The contracts only provide functionality to record and enforce the resulting on-chain status, such as verified or denylisted addresses.
-
-### Swiss profile (CMTA Framework)
+### CMTA profile
 
 Reflects technical requirements and functionalities defined by the CMTA Framework (Blockchain-agnostic functional specification of the CMTA token), providing a technical basis for implementations seeking to address relevant requirements under Swiss law. The framework defines 42 numbered functionalities `ABS-01…42`, of which **only `ABS-01…14` are mandatory**. CMTAT v3.2.0 (Solidity) serves as a semantic reference and technical reference for this profile, without implying full equivalence or conformity. The v3.2.0 release has not itself been fully audited; the latest fully audited release is v3.0.0.
 The profile implements the relevant base and enforcement functionality of the CMTA Framework, covering supply and balance views (ledger-native on Cardano), transfer, mint, burn, pause/unpause and status, deactivate and status, and full-address freeze/unfreeze and status. Optional modules (snapshots, distributions, debt terms, delegated approval) are not implemented; EVM-specific machinery (allowance mechanic, gasless relaying, cross-chain, interface conformance) is not applicable on eUTxO.
@@ -55,7 +28,7 @@ A third-party equivalency assessment of this codebase is maintained at [CMTA/CMT
 
 This repository supplies the token-specific rules around a deployed CIP-113 programmable-token
 base layer. The base layer holds the tokens and dispatches to the logic scripts; it is not included
-in this repository. The German and Swiss profiles use the same validators.
+in this repository.
 
 | Module | Responsibility |
 |---|---|
